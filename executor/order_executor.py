@@ -3,7 +3,6 @@ order_executor.py — Ejecutor de órdenes en Binance
 """
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -49,26 +48,21 @@ class OrderExecutor:
             current_price = float(ticker["last"])
             market        = self.exchange.market(decision.symbol)
 
-            # ── Calcular cantidad y validar mínimos ───────────────────────
-            quantity = decision.amount_usd / current_price
-
-            # Mínimo de cantidad permitida por Binance
+            # ── Calcular cantidad ─────────────────────────────────────────
+            quantity   = decision.amount_usd / current_price
             min_amount = float(market.get("limits", {}).get("amount", {}).get("min", 0) or 0)
             min_cost   = float(market.get("limits", {}).get("cost",   {}).get("min", 0) or 0)
 
-            # Si la cantidad es menor al mínimo, ajustar al mínimo (no rechazar)
             if min_amount > 0 and quantity < min_amount:
                 quantity = min_amount
-                logger.info(f"Cantidad ajustada al mínimo de Binance: {min_amount} {market['base']}")
+                logger.info(f"Cantidad ajustada al mínimo: {min_amount} {market['base']}")
 
-            # Redondear según precisión del exchange
             quantity = float(self.exchange.amount_to_precision(decision.symbol, quantity))
 
-            # Verificar costo mínimo después del redondeo
             if min_cost > 0 and (quantity * current_price) < min_cost:
                 error = (
                     f"Monto (${quantity * current_price:.2f}) menor al mínimo "
-                    f"de costo de Binance (${min_cost:.2f}) para {decision.symbol}."
+                    f"de Binance (${min_cost:.2f}) para {decision.symbol}."
                 )
                 logger.warning(error)
                 return OrderResult(
@@ -90,24 +84,33 @@ class OrderExecutor:
                 leverage = int(decision.leverage.replace("x", ""))
                 await self.exchange.set_leverage(leverage, decision.symbol)
 
-            order      = await self.exchange.create_order(
-                symbol=decision.symbol, type="market", side=side, amount=quantity
+            # ── Abrir posición con SL/TP incluidos en la misma orden ──────
+            order = await self.exchange.create_order(
+                symbol=decision.symbol,
+                type="market",
+                side=side,
+                amount=quantity,
+                params={
+                    "stopLoss": {
+                        "type":      "STOP_MARKET",
+                        "stopPrice": decision.stop_loss,
+                    },
+                    "takeProfit": {
+                        "type":      "TAKE_PROFIT_MARKET",
+                        "stopPrice": decision.take_profit,
+                    },
+                }
             )
+            # ──────────────────────────────────────────────────────────────
+
             order_id   = order.get("id", "unknown")
             fill_price = float(order.get("average", current_price) or current_price)
 
-            logger.info(f"Orden ejecutada: ID {order_id} | Precio: ${fill_price:,.4f}")
-
-            sl_tp_ok = await self.place_sl_tp(
-                symbol=decision.symbol,
-                direction=decision.direction,
-                quantity=quantity,
-                stop_loss=decision.stop_loss,
-                take_profit=decision.take_profit,
+            logger.info(
+                f"Orden ejecutada con SL/TP: ID {order_id} | "
+                f"Precio: ${fill_price:,.4f} | "
+                f"SL: ${decision.stop_loss} | TP: ${decision.take_profit}"
             )
-
-            if not sl_tp_ok:
-                logger.error(f"⚠️ {decision.symbol} abierta SIN SL/TP — el monitor intentará reponerlos.")
 
             return OrderResult(
                 success=True,
@@ -119,7 +122,7 @@ class OrderExecutor:
                 stop_loss=decision.stop_loss,
                 take_profit=decision.take_profit,
                 quantity=quantity,
-                error_msg=None if sl_tp_ok else "Posición abierta pero SL/TP falló"
+                error_msg=None
             )
 
         except ccxt.InsufficientFunds:
@@ -152,13 +155,18 @@ class OrderExecutor:
         take_profit: float,
     ) -> bool:
         """
-        Coloca SL/TP en Binance Futuros.
-        Usa timeInForce=GTE_GTC que es compatible con Cross Margin.
+        Repone SL/TP para posiciones que quedaron sin protección.
+        Usa la misma técnica de orden combinada.
         """
+        side = "buy" if direction == "long" else "sell"
+        # Para reponer necesitamos saber el lado contrario
         close_side = "sell" if direction == "long" else "buy"
+
         sl_ok = False
         tp_ok = False
 
+        # Intentar colocar una orden pequeña con SL/TP para reponerlos
+        # Como ya hay posición abierta, usamos reduceOnly con precio límite
         try:
             await self.exchange.create_order(
                 symbol=symbol,
@@ -166,16 +174,15 @@ class OrderExecutor:
                 side=close_side,
                 amount=quantity,
                 params={
-                    "stopPrice":    stop_loss,
-                    "reduceOnly":   True,
-                    "workingType":  "MARK_PRICE",
-                    "timeInForce":  "GTE_GTC",
+                    "stopPrice":   stop_loss,
+                    "reduceOnly":  True,
+                    "workingType": "MARK_PRICE",
                 }
             )
-            logger.info(f"Stop-loss colocado: ${stop_loss:,.4f}")
+            logger.info(f"SL repuesto: ${stop_loss:,.4f}")
             sl_ok = True
         except Exception as e:
-            logger.error(f"Error colocando SL para {symbol}: {e}")
+            logger.error(f"Error reponiendo SL para {symbol}: {e}")
 
         try:
             await self.exchange.create_order(
@@ -184,15 +191,14 @@ class OrderExecutor:
                 side=close_side,
                 amount=quantity,
                 params={
-                    "stopPrice":    take_profit,
-                    "reduceOnly":   True,
-                    "workingType":  "MARK_PRICE",
-                    "timeInForce":  "GTE_GTC",
+                    "stopPrice":   take_profit,
+                    "reduceOnly":  True,
+                    "workingType": "MARK_PRICE",
                 }
             )
-            logger.info(f"Take-profit colocado: ${take_profit:,.4f}")
+            logger.info(f"TP repuesto: ${take_profit:,.4f}")
             tp_ok = True
         except Exception as e:
-            logger.error(f"Error colocando TP para {symbol}: {e}")
+            logger.error(f"Error reponiendo TP para {symbol}: {e}")
 
         return sl_ok and tp_ok
