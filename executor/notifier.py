@@ -10,7 +10,7 @@ from datetime import datetime
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 

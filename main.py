@@ -28,7 +28,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from loguru import logger
 
-load_dotenv()
+load_dotenv(override=False)
 
 # Configurar logging
 logging.basicConfig(

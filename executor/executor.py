@@ -24,7 +24,7 @@ from .balance import BalanceChecker, BalanceInfo
 from .notifier import WhatsAppNotifier
 from .order_executor import OrderExecutor, OrderResult
 
-load_dotenv()
+load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 

@@ -16,7 +16,7 @@ from .indicators import TechnicalIndicatorCalculator, TechnicalIndicators
 from .levels import SupportResistanceDetector, SupportResistanceResult
 from .scorer import SignalScorer, ScoreBreakdown
 
-load_dotenv()
+load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 # Timeframe principal para el análisis — balance entre señal y ruido

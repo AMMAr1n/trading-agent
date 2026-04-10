@@ -19,7 +19,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 # Ruta de la base de datos

@@ -17,7 +17,7 @@ from analyzer.analyzer import TradingSignal
 from .prompt_builder import PromptBuilder, SYSTEM_PROMPT
 from .decision import TradeDecision
 
-load_dotenv()
+load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 # Modelo de Claude a usar

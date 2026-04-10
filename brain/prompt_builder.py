@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from collector.models import CollectedSnapshot
 from analyzer.analyzer import TradingSignal
 
-load_dotenv()
+load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 
