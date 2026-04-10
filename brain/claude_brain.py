@@ -21,7 +21,7 @@ load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 # Modelo de Claude a usar
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 # Máximo de tokens en la respuesta
 MAX_TOKENS = 1000
@@ -89,6 +89,9 @@ class ClaudeBrain:
             )
 
             # Extraer el texto de la respuesta
+            if not response.content:
+                logger.error("Claude devolvió respuesta vacía")
+                return None
             response_text = response.content[0].text.strip()
             logger.debug(f"Respuesta de Claude: {response_text[:200]}...")
 
