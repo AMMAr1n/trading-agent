@@ -19,7 +19,7 @@ from .coinmarketcap import CoinMarketCapCollector
 from .models import CollectedSnapshot, WhaleAlert, ALL_SYMBOLS
 
 # Cargar variables de entorno desde el archivo .env
-load_dotenv()
+load_dotenv(override=False)
 
 logger = logging.getLogger(__name__)
 
