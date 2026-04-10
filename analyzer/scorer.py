@@ -148,6 +148,8 @@ class SignalScorer:
                 return 12.0  # Tendencia a la baja pero no extremo
             elif rsi < 50:
                 return 6.0   # Neutral tirando a bajista
+            elif rsi < 60:
+                return 3.0   # Zona neutral — puntos parciales
             else:
                 return 0.0   # RSI alto no favorece long
 
@@ -160,6 +162,8 @@ class SignalScorer:
                 return 12.0  # Tendencia alcista pero no extremo
             elif rsi > 50:
                 return 6.0   # Neutral tirando a alcista
+            elif rsi > 40:
+                return 3.0   # Zona neutral — puntos parciales
             else:
                 return 0.0   # RSI bajo no favorece short
 
