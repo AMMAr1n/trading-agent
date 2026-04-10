@@ -67,10 +67,13 @@ class ScoreBreakdown:
     def leverage_recommended(self) -> str:
         """
         Recomienda el apalancamiento basado en el score.
-        Score 65-79 → 1x
-        Score 80+   → 2x (si el contexto macro lo permite)
+        Score 45-59 → 1x
+        Score 60-74 → 2x
+        Score 75+   → 3x
         """
-        if self.total >= 80:
+        if self.total >= 75:
+            return "3x"
+        elif self.total >= 60:
             return "2x"
         return "1x"
 
