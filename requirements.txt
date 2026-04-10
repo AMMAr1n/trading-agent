@@ -1,0 +1,35 @@
+# Trading Agent — Dependencias Python
+# Instalar con: pip install -r requirements.txt
+
+# ── Conexion con exchanges ─────────────────────────────────────────────────────
+ccxt==4.3.89                  # Conexion con Binance y otros exchanges
+
+# ── HTTP y APIs externas ───────────────────────────────────────────────────────
+httpx==0.27.0                 # Cliente HTTP async para CoinMarketCap y otras APIs
+
+# ── Validacion y estructuras de datos ─────────────────────────────────────────
+pydantic==2.7.1               # Validacion de tipos y modelos de datos
+
+# ── Analisis de datos ──────────────────────────────────────────────────────────
+pandas==2.2.2                 # DataFrames para procesar velas historicas
+numpy==1.26.4                 # Calculos numericos para indicadores tecnicos
+ta            # Indicadores tecnicos: RSI, MACD, Bollinger Bands
+
+# ── Variables de entorno ───────────────────────────────────────────────────────
+python-dotenv==1.0.1          # Leer credenciales del archivo .env
+
+# ── Scheduler del loop ────────────────────────────────────────────────────────
+APScheduler==3.10.4           # Ejecutar el loop cada 5 minutos
+
+# ── Servidor web para webhook de WhatsApp ─────────────────────────────────────
+flask==3.0.3                  # Recibir el VoBo del operador
+flask-cors==4.0.1             # Permitir llamadas desde WhatsApp
+
+# ── IA — cerebro del agente ───────────────────────────────────────────────────
+anthropic==0.28.0             # Claude API
+
+# ── Notificaciones WhatsApp ────────────────────────────────────────────────────
+twilio==9.1.0                 # Enviar y recibir mensajes de WhatsApp
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+loguru==0.7.2                 # Logs mas claros y con colores
