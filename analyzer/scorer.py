@@ -99,6 +99,8 @@ class SignalScorer:
 
         El volumen es el indicador más importante porque sin volumen
         cualquier movimiento de precio puede ser una trampa.
+        Escala adaptativa: mercados quietos reciben puntos reducidos
+        para permitir operaciones cautelosas con menor riesgo.
         """
         ratio = indicators.volume.ratio
 
@@ -116,10 +118,13 @@ class SignalScorer:
             return 12.0
         elif ratio >= 0.8:
             # Volumen normal — no confirma ni niega
-            return 6.0
+            return 8.0
+        elif ratio >= 0.5:
+            # Volumen bajo — operar con cautela (1x, monto reducido)
+            return 5.0
         else:
-            # Volumen bajo — señal poco confiable
-            return 0.0
+            # Volumen muy bajo — mercado sin liquidez
+            return 2.0
 
     def score_rsi(
         self,

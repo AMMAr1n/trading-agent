@@ -5,9 +5,9 @@ de órdenes. Es el punto de entrada de la Capa 5.
 
 Flujo:
 1. Consulta saldo real de Binance
-2. Si no hay saldo → notifica por Telegram y detiene el ciclo
+2. Si no hay saldo → notifica por WhatsApp y detiene el ciclo
 3. Si hay saldo → recibe decisión de Claude y ejecuta
-4. Notifica resultado por Telegram
+4. Notifica resultado por WhatsApp
 5. Monitorea alertas de capital
 """
 
@@ -32,6 +32,18 @@ class TradingExecutor:
     """
     Orquestador de la Capa 5 — ejecuta decisiones de Claude
     con verificación de saldo y notificaciones completas.
+
+    Uso:
+        executor = TradingExecutor(exchange)
+        await executor.initialize()
+
+        # Verificar saldo antes de analizar
+        balance = await executor.check_balance()
+        if not balance:
+            return  # Ya notificó por WhatsApp
+
+        # Ejecutar decisión de Claude
+        result = await executor.execute_decision(decision, balance)
     """
 
     def __init__(self, exchange: ccxt.binance, testnet: bool = True):
@@ -41,11 +53,12 @@ class TradingExecutor:
         self.balance_checker = BalanceChecker(exchange)
         self.order_executor = OrderExecutor(exchange, testnet)
 
+        # Notifier puede fallar si no hay credenciales de Twilio
         try:
             self.notifier = WhatsAppNotifier()
             self.notifications_enabled = True
         except EnvironmentError as e:
-            logger.warning(f"Telegram deshabilitado: {e}")
+            logger.warning(f"WhatsApp deshabilitado: {e}")
             self.notifier = None
             self.notifications_enabled = False
 
@@ -58,6 +71,8 @@ class TradingExecutor:
         # Estado del día
         self._daily_starting_balance: Optional[float] = None
         self._last_alert_level: Optional[str] = None
+
+        # Historial del día para el resumen
         self._daily_trades = []
 
         logger.info(
@@ -69,11 +84,17 @@ class TradingExecutor:
     async def check_balance(self) -> Optional[BalanceInfo]:
         """
         Verifica el saldo disponible en Binance.
-        Retorna None si no hay fondos o hay error.
+
+        Si no hay saldo suficiente, envía notificación por WhatsApp
+        y retorna None para detener el ciclo.
+
+        Si hay saldo, retorna la información del balance para
+        que el analizador y Claude la usen.
         """
         balance = await self.balance_checker.get_balance()
 
         if balance is None:
+            # Error de conexión con Binance
             if self.notifications_enabled:
                 self.notifier.notify_critical_error(
                     "No se pudo conectar con Binance para consultar el saldo. "
@@ -84,14 +105,19 @@ class TradingExecutor:
         # Guardar saldo inicial del día (primera vez que corre)
         if self._daily_starting_balance is None:
             self._daily_starting_balance = balance.usdt_free
-            logger.info(f"Saldo inicial del dia: ${self._daily_starting_balance:.2f} USD")
+            logger.info(
+                f"Saldo inicial del dia: ${self._daily_starting_balance:.2f} USD"
+            )
 
+        # Verificar alertas de capital
         await self._check_capital_alerts(balance)
 
+        # Si la alerta es roja — detener completamente
         if self._last_alert_level == "red":
             logger.critical("Capital en reserva mínima — agente detenido")
             return None
 
+        # Verificar si hay fondos suficientes
         if not balance.has_sufficient_funds:
             logger.warning(
                 f"Sin fondos suficientes: ${balance.operable:.2f} disponible, "
@@ -113,29 +139,57 @@ class TradingExecutor:
     ) -> Optional[OrderResult]:
         """
         Ejecuta la decisión de Claude.
-        Si requiere VoBo → solicita aprobación.
-        Si es autónoma → ejecuta directamente.
+
+        Si requiere VoBo → envía solicitud y espera respuesta.
+        Si es autónoma → ejecuta directamente y notifica.
         """
         if not decision.should_trade:
             logger.info(f"Claude decidió no operar: {decision.reason_not_trade}")
             return None
 
+        # Verificar que el monto no supere el capital operable
         if decision.amount_usd > balance.operable:
             decision.amount_usd = balance.operable * 0.4
-            logger.warning(
-                f"Monto ajustado a ${decision.amount_usd:.2f} "
-                f"(capital operable: ${balance.operable:.2f})"
-            )
 
-        if decision.is_autonomous:
-            return await self._execute_autonomous(decision, balance)
+        # Ajustar monto según volumen — menor volumen = menor riesgo
+        volume_ratio = 1.0
+        try:
+            # Intentar obtener ratio de volumen desde la señal
+            volume_ratio = getattr(decision, 'volume_ratio', 1.0) or 1.0
+        except Exception:
+            pass
+
+        if volume_ratio < 0.5:
+            # Volumen muy bajo — usar solo 15% del capital operable
+            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.15)
+            logger.info(f"Volumen muy bajo ({volume_ratio:.1f}x) — monto reducido al 15%: ${decision.amount_usd:.2f}")
+        elif volume_ratio < 0.8:
+            # Volumen bajo — usar solo 20% del capital operable
+            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.20)
+            logger.info(f"Volumen bajo ({volume_ratio:.1f}x) — monto reducido al 20%: ${decision.amount_usd:.2f}")
+        elif volume_ratio < 1.2:
+            # Volumen normal — usar 30%
+            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.30)
         else:
-            return await self._execute_with_vobo(decision, balance)
+            # Volumen alto — usar hasta 40%
+            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.40)
+
+        logger.warning(
+            f"Monto final: ${decision.amount_usd:.2f} "
+            f"(capital operable: ${balance.operable:.2f}, volumen: {volume_ratio:.1f}x)"
+        )
+
+        # Decisión autónoma (monto <= umbral VoBo)
+        if decision.is_autonomous:
+            return await self._execute_autonomous(decision)
+
+        # Decisión que requiere VoBo
+        else:
+            return await self._execute_with_vobo(decision)
 
     async def _execute_autonomous(
         self,
-        decision: TradeDecision,
-        balance: BalanceInfo
+        decision: TradeDecision
     ) -> Optional[OrderResult]:
         """Ejecuta una operación autónoma sin esperar aprobación."""
         logger.info(
@@ -143,25 +197,24 @@ class TradingExecutor:
             f"{decision.direction.upper()} ${decision.amount_usd:.2f}"
         )
 
-        # Notificar entrada con saldo y monto
+        # Notificar entrada
         if self.notifications_enabled and os.getenv("NOTIFY_ON_ENTRY", "true") == "true":
             self.notifier.notify_trade_opened(
                 symbol=decision.symbol,
                 direction=decision.direction,
                 amount_usd=decision.amount_usd,
-                entry_price=decision.stop_loss,  # Aproximado antes de ejecutar
+                entry_price=decision.stop_loss,  # Aproximado
                 stop_loss=decision.stop_loss,
                 take_profit=decision.take_profit,
                 leverage=decision.leverage,
-                reasoning=decision.reasoning,
-                account_balance=balance.usdt_free,      # ← Saldo total en cuenta
-                trade_amount=decision.amount_usd        # ← Monto a usar en la operación
+                reasoning=decision.reasoning
             )
 
         # Ejecutar orden
         result = await self.order_executor.execute(decision)
 
         if result.success:
+            # Guardar para el resumen diario
             self._daily_trades.append({
                 "symbol": decision.symbol,
                 "direction": decision.direction,
@@ -181,10 +234,12 @@ class TradingExecutor:
 
     async def _execute_with_vobo(
         self,
-        decision: TradeDecision,
-        balance: BalanceInfo
+        decision: TradeDecision
     ) -> Optional[OrderResult]:
-        """Solicita VoBo al operador y espera su respuesta."""
+        """
+        Solicita VoBo al operador y espera su respuesta.
+        El webhook de Flask recibe la respuesta del operador.
+        """
         logger.info(
             f"Solicitando VoBo para: {decision.symbol} "
             f"{decision.direction.upper()} ${decision.amount_usd:.2f}"
@@ -200,12 +255,14 @@ class TradingExecutor:
                 take_profit=decision.take_profit,
                 leverage=decision.leverage,
                 reasoning=decision.reasoning,
-                timeout_min=self.vobo_timeout_min,
-                account_balance=balance.usdt_free,      # ← Saldo total en cuenta
-                trade_amount=decision.amount_usd        # ← Monto a usar en la operación
+                timeout_min=self.vobo_timeout_min
             )
 
-        logger.info(f"VoBo enviado — esperando respuesta por {self.vobo_timeout_min} min")
+        # El VoBo handler (Flask webhook) procesará la respuesta
+        # Por ahora retornamos None — el webhook ejecutará cuando llegue el SI
+        logger.info(
+            f"VoBo enviado — esperando respuesta por {self.vobo_timeout_min} min"
+        )
         return None
 
     async def notify_trade_closed(
@@ -215,12 +272,9 @@ class TradingExecutor:
         pnl_usd: float,
         pnl_pct: float,
         duration_min: int,
-        close_reason: str,
-        entry_price: float = 0.0,
-        exit_price: float = 0.0,
-        account_balance_after: float = 0.0
+        close_reason: str
     ):
-        """Notifica el cierre de una posición con precios y saldo actualizado."""
+        """Notifica el cierre de una posición."""
         if self.notifications_enabled and os.getenv("NOTIFY_ON_EXIT", "true") == "true":
             self.notifier.notify_trade_closed(
                 symbol=symbol,
@@ -228,14 +282,11 @@ class TradingExecutor:
                 pnl_usd=pnl_usd,
                 pnl_pct=pnl_pct,
                 duration_min=duration_min,
-                close_reason=close_reason,
-                entry_price=entry_price,                # ← Precio de entrada
-                exit_price=exit_price,                  # ← Precio de salida
-                account_balance_after=account_balance_after  # ← Saldo post-cierre
+                close_reason=close_reason
             )
 
     async def send_daily_report(self, current_balance: float):
-        """Envía el resumen diario."""
+        """Envía el resumen diario a las 10pm hora México."""
         if not self.notifications_enabled:
             return
 
@@ -246,7 +297,7 @@ class TradingExecutor:
         self.notifier.notify_daily_report(
             date=datetime.now().strftime("%d/%m/%Y"),
             total_trades=total_trades,
-            winning_trades=0,
+            winning_trades=0,   # Se actualizará cuando implementemos el tracking completo
             losing_trades=0,
             total_pnl=total_pnl,
             win_rate=0.0,
@@ -254,6 +305,7 @@ class TradingExecutor:
             ending_balance=current_balance
         )
 
+        # Resetear para el día siguiente
         self._daily_starting_balance = None
         self._daily_trades = []
         self._last_alert_level = None
@@ -273,6 +325,7 @@ class TradingExecutor:
         elif pct_remaining <= self.alert_yellow_pct:
             new_level = "yellow"
 
+        # Solo notificar si el nivel cambió
         if new_level and new_level != self._last_alert_level:
             self._last_alert_level = new_level
             if self.notifications_enabled:
