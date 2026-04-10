@@ -63,6 +63,7 @@ class TradingAgent:
             exchange=self.collector.binance.exchange,
             order_executor=self.executor.order_executor,
             notifier=self.executor.notifier if self.executor.notifications_enabled else None,
+            trading_executor=self.executor,
         )
         # ──────────────────────────────────────────────────────────────────
 
@@ -168,6 +169,7 @@ class TradingAgent:
                 entry_price=result.entry_price,
                 stop_loss=result.stop_loss,
                 take_profit=result.take_profit,
+                amount_usd=decision.amount_usd,
             )
             # ─────────────────────────────────────────────────────────────
 

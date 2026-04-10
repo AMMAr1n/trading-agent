@@ -23,7 +23,7 @@ class OrderResult:
     entry_price: float
     stop_loss: float
     take_profit: float
-    quantity: float        # cantidad en moneda base (ej: 3.9 XRP)
+    quantity: float
     error_msg: Optional[str]
 
 
@@ -103,7 +103,6 @@ class OrderExecutor:
 
             logger.info(f"Orden ejecutada: ID {order_id} | Precio: ${fill_price:,.4f}")
 
-            # Colocar SL/TP
             sl_tp_ok = await self.place_sl_tp(
                 symbol=decision.symbol,
                 direction=decision.direction,
@@ -158,8 +157,8 @@ class OrderExecutor:
         take_profit: float,
     ) -> bool:
         """
-        Coloca SL y TP en Binance. Retorna True si ambos quedaron OK.
-        Puede llamarse también desde el PositionMonitor para reponerlos.
+        Coloca SL y TP usando STOP_MARKET y TAKE_PROFIT_MARKET con closePosition=True.
+        Esto es compatible con Binance Futuros Cross Margin.
         """
         close_side = "sell" if direction == "long" else "buy"
         sl_ok = False
@@ -167,8 +166,15 @@ class OrderExecutor:
 
         try:
             await self.exchange.create_order(
-                symbol=symbol, type="stop_market", side=close_side, amount=quantity,
-                params={"stopPrice": stop_loss, "reduceOnly": True}
+                symbol=symbol,
+                type="STOP_MARKET",
+                side=close_side,
+                amount=quantity,
+                params={
+                    "stopPrice": stop_loss,
+                    "closePosition": True,      # cierra la posición completa
+                    "workingType": "MARK_PRICE", # usa mark price, más estable
+                }
             )
             logger.info(f"Stop-loss colocado: ${stop_loss:,.4f}")
             sl_ok = True
@@ -177,8 +183,15 @@ class OrderExecutor:
 
         try:
             await self.exchange.create_order(
-                symbol=symbol, type="take_profit_market", side=close_side, amount=quantity,
-                params={"stopPrice": take_profit, "reduceOnly": True}
+                symbol=symbol,
+                type="TAKE_PROFIT_MARKET",
+                side=close_side,
+                amount=quantity,
+                params={
+                    "stopPrice": take_profit,
+                    "closePosition": True,
+                    "workingType": "MARK_PRICE",
+                }
             )
             logger.info(f"Take-profit colocado: ${take_profit:,.4f}")
             tp_ok = True

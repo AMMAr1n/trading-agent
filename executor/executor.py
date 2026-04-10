@@ -40,16 +40,37 @@ class TradingExecutor:
         self.alert_orange_pct = float(os.getenv("ALERT_ORANGE_PCT", "20")) / 100
         self.alert_red_pct    = float(os.getenv("ALERT_RED_PCT",    "10")) / 100
         self.vobo_timeout_min = int(os.getenv("VOBO_TIMEOUT_MIN", "10"))
+        # Máximo % del capital total a comprometer en posiciones simultáneas
+        self.max_capital_pct  = float(os.getenv("MAX_CAPITAL_PCT", "60")) / 100
 
         self._daily_starting_balance: Optional[float] = None
         self._last_alert_level: Optional[str] = None
         self._daily_trades = []
 
+        # Capital comprometido en posiciones abiertas (rastreado por el bot)
+        self._committed_usd: float = 0.0
+
         logger.info(
             f"TradingExecutor inicializado | "
             f"Modo: {'TESTNET' if testnet else 'PRODUCCION'} | "
-            f"Notificaciones: {'ON' if self.notifications_enabled else 'OFF'}"
+            f"Notificaciones: {'ON' if self.notifications_enabled else 'OFF'} | "
+            f"Capital máximo simultáneo: {self.max_capital_pct*100:.0f}%"
         )
+
+    def commit_capital(self, amount_usd: float):
+        """Registra capital comprometido al abrir una posición."""
+        self._committed_usd += amount_usd
+        logger.info(f"Capital comprometido: ${self._committed_usd:.2f} USD")
+
+    def release_capital(self, amount_usd: float):
+        """Libera capital cuando se cierra una posición."""
+        self._committed_usd = max(0.0, self._committed_usd - amount_usd)
+        logger.info(f"Capital liberado. Comprometido ahora: ${self._committed_usd:.2f} USD")
+
+    def available_capital(self, balance: BalanceInfo) -> float:
+        """Capital disponible para nuevas posiciones."""
+        max_allowed = balance.usdt_free * self.max_capital_pct
+        return max(0.0, max_allowed - self._committed_usd)
 
     async def check_balance(self) -> Optional[BalanceInfo]:
         balance = await self.balance_checker.get_balance()
@@ -94,6 +115,16 @@ class TradingExecutor:
             logger.info(f"Claude decidió no operar: {decision.reason_not_trade}")
             return None
 
+        # ── Control de capital comprometido ───────────────────────────────
+        capital_disponible = self.available_capital(balance)
+        if capital_disponible < MIN_TRADE_AMOUNT_USD:
+            logger.warning(
+                f"Capital disponible para nuevas posiciones: ${capital_disponible:.2f} — "
+                f"ya hay ${self._committed_usd:.2f} comprometidos. Saltando {decision.symbol}."
+            )
+            return None
+        # ──────────────────────────────────────────────────────────────────
+
         if decision.amount_usd > balance.operable:
             decision.amount_usd = balance.operable * 0.4
 
@@ -112,7 +143,7 @@ class TradingExecutor:
         else:
             decision.amount_usd = min(decision.amount_usd, balance.operable * 0.40)
 
-        # ── Subir al mínimo absoluto si el monto quedó muy bajo ───────────
+        # Subir al mínimo absoluto si quedó muy bajo
         if decision.amount_usd < MIN_TRADE_AMOUNT_USD:
             if balance.operable >= MIN_TRADE_AMOUNT_USD:
                 logger.info(
@@ -126,11 +157,14 @@ class TradingExecutor:
                     f"para el mínimo de ${MIN_TRADE_AMOUNT_USD:.2f} — saltando {decision.symbol}"
                 )
                 return None
-        # ──────────────────────────────────────────────────────────────────
+
+        # No superar el capital disponible para nuevas posiciones
+        decision.amount_usd = min(decision.amount_usd, capital_disponible)
 
         logger.warning(
             f"Monto final: ${decision.amount_usd:.2f} "
-            f"(operable: ${balance.operable:.2f}, volumen: {volume_ratio:.1f}x)"
+            f"(operable: ${balance.operable:.2f}, comprometido: ${self._committed_usd:.2f}, "
+            f"disponible: ${capital_disponible:.2f}, volumen: {volume_ratio:.1f}x)"
         )
 
         if decision.is_autonomous:
@@ -165,6 +199,9 @@ class TradingExecutor:
         result = await self.order_executor.execute(decision)
 
         if result.success:
+            # Registrar capital comprometido
+            self.commit_capital(decision.amount_usd)
+
             self._daily_trades.append({
                 "symbol":      decision.symbol,
                 "direction":   decision.direction,
@@ -174,7 +211,7 @@ class TradingExecutor:
             })
             logger.info(f"Operacion abierta exitosamente: {result.order_id}")
 
-            if result.error_msg:  # SL/TP falló
+            if result.error_msg:
                 if self.notifications_enabled:
                     self.notifier.notify_critical_error(
                         f"⚠️ {decision.symbol}: posición abierta pero SL/TP falló. "
@@ -224,8 +261,13 @@ class TradingExecutor:
         pnl_usd: float,
         pnl_pct: float,
         duration_min: int,
-        close_reason: str
+        close_reason: str,
+        amount_usd: float = 0.0
     ):
+        # Liberar capital al cerrar
+        if amount_usd > 0:
+            self.release_capital(amount_usd)
+
         if self.notifications_enabled and os.getenv("NOTIFY_ON_EXIT", "true") == "true":
             self.notifier.notify_trade_closed(
                 symbol=symbol, direction=direction,
@@ -249,6 +291,7 @@ class TradingExecutor:
         self._daily_starting_balance = None
         self._daily_trades = []
         self._last_alert_level = None
+        self._committed_usd = 0.0  # reset diario
 
     async def _check_capital_alerts(self, balance: BalanceInfo):
         if not self._daily_starting_balance:
