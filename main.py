@@ -96,11 +96,19 @@ class TradingAgent:
 
             logger.info(f"Saldo: {balance.summary}")
 
-            open_trades = self.db.get_open_trades_count()
-            max_trades  = int(os.getenv("MAX_OPEN_TRADES", "10"))
+            # Sincronizar con Binance — contar posiciones reales abiertas
+            max_trades = int(os.getenv("MAX_OPEN_TRADES", "3"))
+            try:
+                positions    = await self.collector.binance.exchange.fetch_positions()
+                open_trades  = sum(
+                    1 for p in positions
+                    if p.get("contracts") and float(p["contracts"]) > 0
+                )
+            except Exception:
+                open_trades = self.db.get_open_trades_count()  # fallback a DB
 
             if open_trades >= max_trades:
-                logger.info(f"Máximo de operaciones alcanzado: {open_trades}/{max_trades}")
+                logger.info(f"Máximo de operaciones alcanzado: {open_trades}/{max_trades} (Binance)")
                 return
 
             snapshot = await self.collector.collect()
