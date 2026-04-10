@@ -228,7 +228,7 @@ class TechnicalAnalyzer:
 
         # Si el score no supera el mínimo, no hay señal
         if not score.is_tradeable:
-            logger.debug(
+            logger.info(
                 f"{symbol} — Score insuficiente: {score.total:.0f}/{MIN_SCORE}"
             )
             return None
