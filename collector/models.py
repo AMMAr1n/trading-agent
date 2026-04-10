@@ -21,7 +21,7 @@ SPOT_TIER1 = ["ETHUSDT", "SOLUSDT", "BNBUSDT"]
 SPOT_TIER2 = ["DOGEUSDT", "XRPUSDT", "ADAUSDT"]
 
 # Spot Tier 3 — memecoins, solo con score muy alto
-SPOT_TIER3 = ["PEPEUSDT", "SHIBUSDT"]
+SPOT_TIER3 = []  # PEPE y SHIB son Spot — pendiente implementar
 
 # Todos los activos que el colector debe monitorear
 ALL_SYMBOLS = FUTURES_SYMBOLS + SPOT_TIER1 + SPOT_TIER2 + SPOT_TIER3
