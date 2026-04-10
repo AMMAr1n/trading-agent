@@ -192,9 +192,9 @@ class TechnicalIndicators:
         elif "downtrend" in self.trend:
             bearish_signals += 1
 
-        if bullish_signals >= 3:
+        if bullish_signals >= 2:
             return "long"
-        elif bearish_signals >= 3:
+        elif bearish_signals >= 2:
             return "short"
         return "neutral"
 
