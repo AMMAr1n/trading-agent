@@ -3,6 +3,7 @@ order_executor.py — Ejecutor de órdenes en Binance
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -46,34 +47,28 @@ class OrderExecutor:
         try:
             ticker        = await self.exchange.fetch_ticker(decision.symbol)
             current_price = float(ticker["last"])
-            quantity      = decision.amount_usd / current_price
+            market        = self.exchange.market(decision.symbol)
 
-            market   = self.exchange.market(decision.symbol)
-            quantity = float(self.exchange.amount_to_precision(decision.symbol, quantity))
+            # ── Calcular cantidad y validar mínimos ───────────────────────
+            quantity = decision.amount_usd / current_price
 
-            # ── Validación de mínimos de Binance ──────────────────────────
+            # Mínimo de cantidad permitida por Binance
             min_amount = float(market.get("limits", {}).get("amount", {}).get("min", 0) or 0)
             min_cost   = float(market.get("limits", {}).get("cost",   {}).get("min", 0) or 0)
 
+            # Si la cantidad es menor al mínimo, ajustar al mínimo (no rechazar)
             if min_amount > 0 and quantity < min_amount:
-                error = (
-                    f"Cantidad ({quantity} {market['base']}) menor al mínimo "
-                    f"de Binance ({min_amount}). "
-                    f"Necesitas al menos ${min_amount * current_price:.2f} USD."
-                )
-                logger.warning(error)
-                return OrderResult(
-                    success=False, order_id=None,
-                    symbol=decision.symbol, direction=decision.direction,
-                    amount_usd=decision.amount_usd, entry_price=0,
-                    stop_loss=decision.stop_loss, take_profit=decision.take_profit,
-                    quantity=0, error_msg=error
-                )
+                quantity = min_amount
+                logger.info(f"Cantidad ajustada al mínimo de Binance: {min_amount} {market['base']}")
 
+            # Redondear según precisión del exchange
+            quantity = float(self.exchange.amount_to_precision(decision.symbol, quantity))
+
+            # Verificar costo mínimo después del redondeo
             if min_cost > 0 and (quantity * current_price) < min_cost:
                 error = (
                     f"Monto (${quantity * current_price:.2f}) menor al mínimo "
-                    f"de Binance (${min_cost:.2f}) para {decision.symbol}."
+                    f"de costo de Binance (${min_cost:.2f}) para {decision.symbol}."
                 )
                 logger.warning(error)
                 return OrderResult(
@@ -157,8 +152,8 @@ class OrderExecutor:
         take_profit: float,
     ) -> bool:
         """
-        Coloca SL y TP usando STOP_MARKET y TAKE_PROFIT_MARKET con closePosition=True.
-        Esto es compatible con Binance Futuros Cross Margin.
+        Coloca SL/TP en Binance Futuros.
+        Usa timeInForce=GTE_GTC que es compatible con Cross Margin.
         """
         close_side = "sell" if direction == "long" else "buy"
         sl_ok = False
@@ -171,9 +166,10 @@ class OrderExecutor:
                 side=close_side,
                 amount=quantity,
                 params={
-                    "stopPrice": stop_loss,
-                    "closePosition": True,      # cierra la posición completa
-                    "workingType": "MARK_PRICE", # usa mark price, más estable
+                    "stopPrice":    stop_loss,
+                    "reduceOnly":   True,
+                    "workingType":  "MARK_PRICE",
+                    "timeInForce":  "GTE_GTC",
                 }
             )
             logger.info(f"Stop-loss colocado: ${stop_loss:,.4f}")
@@ -188,9 +184,10 @@ class OrderExecutor:
                 side=close_side,
                 amount=quantity,
                 params={
-                    "stopPrice": take_profit,
-                    "closePosition": True,
-                    "workingType": "MARK_PRICE",
+                    "stopPrice":    take_profit,
+                    "reduceOnly":   True,
+                    "workingType":  "MARK_PRICE",
+                    "timeInForce":  "GTE_GTC",
                 }
             )
             logger.info(f"Take-profit colocado: ${take_profit:,.4f}")
