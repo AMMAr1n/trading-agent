@@ -12,11 +12,17 @@ Solo se propone operación si el score supera MIN_SCORE (65 por defecto).
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional
 
+from dotenv import load_dotenv
+
 from .indicators import TechnicalIndicators
 from .levels import SupportResistanceResult
+
+load_dotenv(override=False)
+MIN_SCORE = int(os.getenv("MIN_SCORE", "45"))
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +67,7 @@ class ScoreBreakdown:
     @property
     def is_tradeable(self) -> bool:
         """True si el score supera el umbral mínimo para operar."""
-        return self.total >= 65 and self.direction != "neutral"
+        return self.total >= MIN_SCORE and self.direction != "neutral"
 
     @property
     def leverage_recommended(self) -> str:
