@@ -23,7 +23,7 @@ class TradeDecision:
     amount_usd: float           # Monto en USD a invertir
     stop_loss: float            # Precio de stop-loss
     take_profit: float          # Precio de take-profit
-    leverage: str               # "1x" | "2x"
+    leverage: str               # "1x" | "2x" | "3x"
     trading_mode: str           # "futures" | "spot_tier1" | etc
 
     # Razonamiento de Claude en lenguaje natural

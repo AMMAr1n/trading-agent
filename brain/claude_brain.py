@@ -50,7 +50,7 @@ class ClaudeBrain:
         self.prompt_builder = PromptBuilder()
 
         self.vobo_min_pct = float(os.getenv("VOBO_MIN_PCT", "15")) / 100
-        self.leverage_2x_score = float(os.getenv("LEVERAGE_2X_SCORE", "80"))
+        # Apalancamiento decidido por Claude según reglas del prompt (1x/2x/3x)
 
         logger.info("ClaudeBrain inicializado")
 
