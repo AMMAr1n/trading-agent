@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Timeframe principal para el análisis — balance entre señal y ruido
 PRIMARY_TIMEFRAME = "1h"
-CONFIRMATION_TIMEFRAME = "4h"  # Confirma la tendencia mayor
+CONFIRMATION_TIMEFRAME = "2h"  # Confirma la tendencia mayor
 
 # Score mínimo para considerar una señal válida
 MIN_SCORE = int(os.getenv("MIN_SCORE", "65"))

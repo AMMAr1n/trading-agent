@@ -27,7 +27,7 @@ SPOT_TIER3 = ["PEPEUSDT", "SHIBUSDT"]
 ALL_SYMBOLS = FUTURES_SYMBOLS + SPOT_TIER1 + SPOT_TIER2 + SPOT_TIER3
 
 # Timeframes de velas que se recopilan por cada activo
-CANDLE_TIMEFRAMES = ["1m", "15m", "1h", "4h"]
+CANDLE_TIMEFRAMES = ["1m", "15m", "1h", "2h", "4h"]
 
 # Cuantas velas historicas pedir por timeframe
 CANDLES_LIMIT = 200
