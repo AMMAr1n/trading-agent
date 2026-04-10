@@ -69,7 +69,6 @@ class OrderExecutor:
             current_price = float(ticker["last"])
 
             # Calcular cantidad en la moneda base
-            # Para BTCUSDT: si quiero $80 USD y BTC está a $72,000 → compro 0.00111 BTC
             quantity = decision.amount_usd / current_price
 
             # Redondear según las reglas del exchange
@@ -77,6 +76,42 @@ class OrderExecutor:
             quantity = float(self.exchange.amount_to_precision(
                 decision.symbol, quantity
             ))
+
+            # ── VALIDACIÓN DE MÍNIMOS ──────────────────────────────────────
+            # Binance rechaza órdenes por debajo del mínimo permitido
+            min_amount = float(market.get("limits", {}).get("amount", {}).get("min", 0) or 0)
+            min_cost   = float(market.get("limits", {}).get("cost",   {}).get("min", 0) or 0)
+
+            if min_amount > 0 and quantity < min_amount:
+                error = (
+                    f"Cantidad calculada ({quantity} {market['base']}) "
+                    f"es menor al mínimo de Binance ({min_amount}). "
+                    f"Necesitas al menos ${min_amount * current_price:.2f} USD para operar {decision.symbol}."
+                )
+                logger.warning(error)
+                return OrderResult(
+                    success=False, order_id=None,
+                    symbol=decision.symbol, direction=decision.direction,
+                    amount_usd=decision.amount_usd, entry_price=0,
+                    stop_loss=decision.stop_loss, take_profit=decision.take_profit,
+                    error_msg=error
+                )
+
+            if min_cost > 0 and (quantity * current_price) < min_cost:
+                error = (
+                    f"Monto calculado (${quantity * current_price:.2f} USD) "
+                    f"es menor al mínimo de costo de Binance (${min_cost:.2f} USD) "
+                    f"para {decision.symbol}."
+                )
+                logger.warning(error)
+                return OrderResult(
+                    success=False, order_id=None,
+                    symbol=decision.symbol, direction=decision.direction,
+                    amount_usd=decision.amount_usd, entry_price=0,
+                    stop_loss=decision.stop_loss, take_profit=decision.take_profit,
+                    error_msg=error
+                )
+            # ──────────────────────────────────────────────────────────────
 
             # Determinar lado de la orden
             side = "buy" if decision.direction == "long" else "sell"
@@ -117,7 +152,12 @@ class OrderExecutor:
             )
 
             # Colocar stop-loss y take-profit
-            await self._place_sl_tp(decision, quantity, fill_price)
+            sl_tp_ok = await self._place_sl_tp(decision, quantity, fill_price)
+            if not sl_tp_ok:
+                logger.error(
+                    f"⚠️  Posición abierta en {decision.symbol} SIN SL/TP — "
+                    f"ciérrala manualmente en Binance si es necesario."
+                )
 
             return OrderResult(
                 success=True,
@@ -128,7 +168,7 @@ class OrderExecutor:
                 entry_price=fill_price,
                 stop_loss=decision.stop_loss,
                 take_profit=decision.take_profit,
-                error_msg=None
+                error_msg=None if sl_tp_ok else "Posición abierta pero SL/TP falló — sin protección automática"
             )
 
         except ccxt.InsufficientFunds:
@@ -157,35 +197,47 @@ class OrderExecutor:
         decision: TradeDecision,
         quantity: float,
         entry_price: float
-    ):
+    ) -> bool:
         """
         Coloca las órdenes de stop-loss y take-profit después de entrar.
+        Retorna True si ambas se colocaron correctamente, False si alguna falló.
         """
-        try:
-            # Lado contrario para cerrar la posición
-            close_side = "sell" if decision.direction == "long" else "buy"
+        close_side = "sell" if decision.direction == "long" else "buy"
+        sl_ok = False
+        tp_ok = False
 
-            # Stop-loss
+        # ── STOP-LOSS ──────────────────────────────────────────────────────
+        try:
             await self.exchange.create_order(
                 symbol=decision.symbol,
                 type="stop_market",
                 side=close_side,
                 amount=quantity,
-                params={"stopPrice": decision.stop_loss}
+                params={
+                    "stopPrice": decision.stop_loss,
+                    "reduceOnly": True,
+                }
             )
             logger.info(f"Stop-loss colocado: ${decision.stop_loss:,.4f}")
+            sl_ok = True
+        except Exception as e:
+            logger.error(f"Error colocando stop-loss para {decision.symbol}: {e}")
 
-            # Take-profit
+        # ── TAKE-PROFIT ────────────────────────────────────────────────────
+        try:
             await self.exchange.create_order(
                 symbol=decision.symbol,
                 type="take_profit_market",
                 side=close_side,
                 amount=quantity,
-                params={"stopPrice": decision.take_profit}
+                params={
+                    "stopPrice": decision.take_profit,
+                    "reduceOnly": True,
+                }
             )
             logger.info(f"Take-profit colocado: ${decision.take_profit:,.4f}")
-
+            tp_ok = True
         except Exception as e:
-            logger.error(
-                f"Error colocando SL/TP — la posición está abierta SIN protección: {e}"
-            )
+            logger.error(f"Error colocando take-profit para {decision.symbol}: {e}")
+
+        return sl_ok and tp_ok
