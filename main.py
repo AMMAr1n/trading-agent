@@ -1,7 +1,5 @@
 """
 main.py — Loop principal del agente de trading
-Responsabilidad: coordinar todas las capas y ejecutar
-el ciclo de análisis cada 5 minutos.
 """
 
 import asyncio
@@ -30,21 +28,23 @@ from analyzer import TechnicalAnalyzer
 from analyzer.analyzer import TradingSignal
 from brain import ClaudeBrain
 from executor import TradingExecutor
+from executor.position_monitor import PositionMonitor
 from database import TradingDatabase, TradeRecord, SignalRecord
 
 LOOP_INTERVAL_MIN = int(os.getenv("LOOP_INTERVAL_MIN", "5"))
-DAILY_REPORT_TZ = os.getenv("DAILY_REPORT_TIMEZONE", "America/Mexico_City")
+DAILY_REPORT_TZ   = os.getenv("DAILY_REPORT_TIMEZONE", "America/Mexico_City")
 
 
 class TradingAgent:
     def __init__(self):
         self.collector = DataCollector()
-        self.analyzer = TechnicalAnalyzer()
-        self.brain = ClaudeBrain()
+        self.analyzer  = TechnicalAnalyzer()
+        self.brain     = ClaudeBrain()
         self.executor: TradingExecutor = None
-        self.db = TradingDatabase()
+        self.monitor:  PositionMonitor  = None
+        self.db        = TradingDatabase()
         self.scheduler = AsyncIOScheduler(timezone=DAILY_REPORT_TZ)
-        self.running = False
+        self.running   = False
         logger.info("TradingAgent inicializado")
 
     async def initialize(self):
@@ -58,18 +58,22 @@ class TradingAgent:
             testnet=testnet
         )
 
-        # Reportes cada 6 horas: 6am, 12pm, 6pm, 12am hora México
+        # ── Position Monitor ──────────────────────────────────────────────
+        self.monitor = PositionMonitor(
+            exchange=self.collector.binance.exchange,
+            order_executor=self.executor.order_executor,
+            notifier=self.executor.notifier if self.executor.notifications_enabled else None,
+        )
+        # ──────────────────────────────────────────────────────────────────
+
         for hour in [0, 6, 12, 18]:
             self.scheduler.add_job(
                 self.send_periodic_report,
-                "cron",
-                hour=hour,
-                minute=0,
+                "cron", hour=hour, minute=0,
                 id=f"report_{hour:02d}h"
             )
 
         self.scheduler.start()
-
         logger.info(
             f"Agente listo | Loop: cada {LOOP_INTERVAL_MIN} min | "
             f"Reportes: 12am, 6am, 12pm, 6pm ({DAILY_REPORT_TZ})"
@@ -80,6 +84,10 @@ class TradingAgent:
         logger.info(f"─── Inicio de ciclo: {cycle_start.strftime('%H:%M:%S')} ───")
 
         try:
+            # ── 1. Monitorear posiciones abiertas primero ─────────────────
+            await self.monitor.run()
+            # ─────────────────────────────────────────────────────────────
+
             balance = await self.executor.check_balance()
             if balance is None:
                 logger.warning("Sin saldo o error de conexión — ciclo saltado")
@@ -88,7 +96,7 @@ class TradingAgent:
             logger.info(f"Saldo: {balance.summary}")
 
             open_trades = self.db.get_open_trades_count()
-            max_trades = int(os.getenv("MAX_OPEN_TRADES", "10"))
+            max_trades  = int(os.getenv("MAX_OPEN_TRADES", "10"))
 
             if open_trades >= max_trades:
                 logger.info(f"Máximo de operaciones alcanzado: {open_trades}/{max_trades}")
@@ -103,12 +111,9 @@ class TradingAgent:
 
             for signal in analysis.signals:
                 self.db.record_signal(SignalRecord(
-                    id=None,
-                    symbol=signal.symbol,
-                    direction=signal.direction,
-                    score=signal.score,
-                    was_traded=False,
-                    reason_not_traded=None,
+                    id=None, symbol=signal.symbol,
+                    direction=signal.direction, score=signal.score,
+                    was_traded=False, reason_not_traded=None,
                     detected_at=datetime.now(),
                     rsi=signal.indicators_1h.rsi.value,
                     macd_signal=signal.indicators_1h.macd.signal,
@@ -125,7 +130,6 @@ class TradingAgent:
             for signal in analysis.signals[:3]:
                 open_count = self.db.get_open_trades_count()
                 if open_count >= max_trades:
-                    logger.info("Máximo de operaciones alcanzado durante el ciclo")
                     break
                 await self.process_signal(signal, balance, snapshot)
 
@@ -145,7 +149,6 @@ class TradingAgent:
         )
 
         decision = self.brain.decide(signal, snapshot, balance.operable)
-
         if not decision:
             logger.warning(f"Claude no pudo decidir para {signal.symbol}")
             return
@@ -157,9 +160,19 @@ class TradingAgent:
         result = await self.executor.execute_decision(decision, balance)
 
         if result and result.success:
+            # ── Registrar en monitor de posiciones ───────────────────────
+            self.monitor.register(
+                symbol=result.symbol,
+                direction=result.direction,
+                quantity=result.quantity,
+                entry_price=result.entry_price,
+                stop_loss=result.stop_loss,
+                take_profit=result.take_profit,
+            )
+            # ─────────────────────────────────────────────────────────────
+
             trade_id = self.db.open_trade(TradeRecord(
-                id=None,
-                symbol=decision.symbol,
+                id=None, symbol=decision.symbol,
                 direction=decision.direction,
                 trading_mode=decision.trading_mode,
                 amount_usd=decision.amount_usd,
@@ -171,58 +184,45 @@ class TradingAgent:
                 reasoning=decision.reasoning,
                 status="open",
                 opened_at=datetime.now(),
-                closed_at=None,
-                exit_price=None,
-                pnl_usd=None,
-                pnl_pct=None,
-                close_reason=None,
-                order_id=result.order_id
+                closed_at=None, exit_price=None,
+                pnl_usd=None, pnl_pct=None,
+                close_reason=None, order_id=result.order_id
             ))
             logger.info(f"Operación registrada en DB: ID {trade_id}")
 
     async def send_periodic_report(self):
-        """Envía reporte de estado cada 6 horas."""
         now = datetime.now().strftime("%H:%M")
         logger.info(f"Generando reporte periódico ({now})...")
-
         try:
-            balance = await self.executor.check_balance()
+            balance         = await self.executor.check_balance()
             current_balance = balance.usdt_free if balance else 0
-
-            today = datetime.now().strftime("%Y-%m-%d")
-            summary = self.db.get_daily_summary(today)
-
+            today           = datetime.now().strftime("%Y-%m-%d")
+            summary         = self.db.get_daily_summary(today)
             self.db.save_daily_summary(
                 date=today,
                 starting_balance=self.executor._daily_starting_balance or current_balance,
                 ending_balance=current_balance
             )
-
             await self.executor.send_daily_report(current_balance)
-
             logger.info(
                 f"Reporte enviado ({now}): {summary['total_trades']} operaciones | "
                 f"P&L: ${summary['total_pnl_usd']:.2f}"
             )
-
         except Exception as e:
             logger.error(f"Error generando reporte: {e}")
 
     async def run(self):
         self.running = True
-
         try:
             balance = await self.executor.check_balance()
             if balance and self.executor.notifications_enabled:
                 self.executor.notifier.notify_agent_started(
-                    balance.usdt_free,
-                    balance.operable
+                    balance.usdt_free, balance.operable
                 )
         except Exception:
             pass
 
         logger.info(f"Agente corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
-
         while self.running:
             await self.run_cycle()
             await asyncio.sleep(LOOP_INTERVAL_MIN * 60)
@@ -237,7 +237,7 @@ class TradingAgent:
 
 async def main():
     agent = TradingAgent()
-    loop = asyncio.get_event_loop()
+    loop  = asyncio.get_event_loop()
 
     def handle_shutdown():
         logger.info("Señal de cierre recibida")

@@ -1,13 +1,12 @@
 """
 executor/ — Capa 5: Notificación y ejecución
-
-Exporta las clases principales para uso desde otros módulos.
 """
 
 from .executor import TradingExecutor
 from .balance import BalanceChecker, BalanceInfo
 from .notifier import WhatsAppNotifier
 from .order_executor import OrderExecutor, OrderResult
+from .position_monitor import PositionMonitor
 
 __all__ = [
     "TradingExecutor",
@@ -16,4 +15,5 @@ __all__ = [
     "WhatsAppNotifier",
     "OrderExecutor",
     "OrderResult",
+    "PositionMonitor",
 ]
