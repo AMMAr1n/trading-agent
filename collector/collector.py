@@ -19,7 +19,11 @@ from .coinmarketcap import CoinMarketCapCollector
 from .models import CollectedSnapshot, WhaleAlert, ALL_SYMBOLS
 
 # Cargar variables de entorno desde el archivo .env
-load_dotenv(override=False)
+# En Railway las variables vienen del sistema — load_dotenv solo aplica localmente
+from pathlib import Path
+env_file = Path(__file__).parent.parent / ".env"
+if env_file.exists():
+    load_dotenv(env_file, override=False)
 
 logger = logging.getLogger(__name__)
 
