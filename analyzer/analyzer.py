@@ -229,7 +229,9 @@ class TechnicalAnalyzer:
         # Si el score no supera el mínimo, no hay señal
         if not score.is_tradeable:
             logger.info(
-                f"{symbol} — Score insuficiente: {score.total:.0f}/{MIN_SCORE}"
+                f"{symbol} — Score insuficiente: {score.total:.0f}/{MIN_SCORE} "
+            f"(EMA:{score.ema_trend_points:.0f} Vol:{score.volume_points:.0f} "
+            f"MACD:{score.macd_points:.0f} RSI:{score.rsi_points:.0f} BB:{score.bollinger_points:.0f})"
             )
             return None
 
