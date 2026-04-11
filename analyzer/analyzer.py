@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 # Timeframe principal para el análisis — balance entre señal y ruido
 PRIMARY_TIMEFRAME = "1h"
-CONFIRMATION_TIMEFRAME = "2h"  # Confirma la tendencia mayor
+CONFIRMATION_TIMEFRAME = "2h"  # Confirma la tendencia intermedia
+DAILY_TIMEFRAME = "1d"         # Tendencia mayor — filtro direccional
 
 # Score mínimo para considerar una señal válida
 MIN_SCORE = int(os.getenv("MIN_SCORE", "65"))
@@ -46,6 +47,7 @@ class TradingSignal:
     reasoning: str             # Explicación para Claude
     indicators_1h: TechnicalIndicators
     indicators_4h: Optional[TechnicalIndicators]
+    indicators_1d: Optional[TechnicalIndicators]
     levels: SupportResistanceResult
 
     @property
@@ -196,7 +198,8 @@ class TechnicalAnalyzer:
             return None
 
         candles_1h = candles_by_tf[PRIMARY_TIMEFRAME]
-        candles_4h = candles_by_tf.get(CONFIRMATION_TIMEFRAME, [])
+        candles_2h = candles_by_tf.get(CONFIRMATION_TIMEFRAME, [])
+        candles_1d = candles_by_tf.get(DAILY_TIMEFRAME, [])
 
         # Calcular indicadores en timeframe principal
         indicators_1h = self.indicator_calc.calculate(symbol, PRIMARY_TIMEFRAME, candles_1h)
@@ -205,8 +208,13 @@ class TechnicalAnalyzer:
 
         # Calcular indicadores en timeframe de confirmación (opcional)
         indicators_4h = None
-        if candles_4h:
-            indicators_4h = self.indicator_calc.calculate(symbol, CONFIRMATION_TIMEFRAME, candles_4h)
+        if candles_2h:
+            indicators_4h = self.indicator_calc.calculate(symbol, CONFIRMATION_TIMEFRAME, candles_2h)
+
+        # Calcular indicadores diarios — tendencia mayor
+        indicators_1d = None
+        if candles_1d and len(candles_1d) >= 50:
+            indicators_1d = self.indicator_calc.calculate(symbol, DAILY_TIMEFRAME, candles_1d)
 
         # Detectar soportes y resistencias
         levels = self.level_detector.detect(symbol, candles_1h)
@@ -235,14 +243,22 @@ class TechnicalAnalyzer:
             )
             return None
 
-        # Confirmación con timeframe 4h
+        # Filtro diario — tendencia mayor (más permisivo que 2h)
+        if indicators_1d:
+            direction_1d = indicators_1d.suggested_direction
+            if direction_1d != "neutral" and direction_1d != direction:
+                logger.info(
+                    f"{symbol} — Tendencia diaria ({direction_1d}) contradice 1h ({direction}) — señal descartada"
+                )
+                return None
+
+        # Confirmación con timeframe 2h
         if indicators_4h:
             direction_4h = indicators_4h.suggested_direction
             if direction_4h != "neutral" and direction_4h != direction:
-                # Timeframes contradictorios — reducir score
                 logger.info(
                     f"{symbol} — Contradicción entre 1h ({direction}) "
-                    f"y 4h ({direction_4h}) — señal descartada"
+                    f"y 2h ({direction_4h}) — señal descartada"
                 )
                 return None
 
@@ -262,6 +278,7 @@ class TechnicalAnalyzer:
             reasoning=score.reasoning,
             indicators_1h=indicators_1h,
             indicators_4h=indicators_4h,
+            indicators_1d=indicators_1d,
             levels=levels,
         )
 

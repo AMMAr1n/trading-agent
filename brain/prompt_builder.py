@@ -103,17 +103,30 @@ class PromptBuilder:
         support_dist = f"{signal.levels.supports[0].distance_pct:.1f}% abajo" if signal.levels.supports else "N/A"
         resistance_dist = f"{signal.levels.resistances[0].distance_pct:.1f}% arriba" if signal.levels.resistances else "N/A"
 
-        # Contexto del timeframe 4h si está disponible
+        # Contexto del timeframe 2h si está disponible
         confirmation_4h = ""
         if signal.indicators_4h:
             ind4h = signal.indicators_4h
             confirmation_4h = f"""
-=== CONFIRMACIÓN 4H ===
-Tendencia 4h:     {ind4h.trend}
-RSI 4h:           {ind4h.rsi.value:.1f} ({ind4h.rsi.signal})
-MACD 4h:          {ind4h.macd.signal}
-Dirección 4h:     {ind4h.suggested_direction}
-Alineación 1h/4h: {'✅ ALINEADOS' if ind4h.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN — considera reducir tamaño'}"""
+=== CONFIRMACIÓN 2H ===
+Tendencia 2h:     {ind4h.trend}
+RSI 2h:           {ind4h.rsi.value:.1f} ({ind4h.rsi.signal})
+MACD 2h:          {ind4h.macd.signal}
+Dirección 2h:     {ind4h.suggested_direction}
+Alineación 1h/2h: {'✅ ALINEADOS' if ind4h.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN — considera reducir tamaño'}"""
+
+        # Contexto diario — tendencia mayor
+        daily_context = ""
+        if hasattr(signal, 'indicators_1d') and signal.indicators_1d:
+            ind1d = signal.indicators_1d
+            daily_context = f"""
+=== TENDENCIA DIARIA (1D) ===
+Tendencia diaria: {ind1d.trend}
+RSI diario:       {ind1d.rsi.value:.1f} ({ind1d.rsi.signal})
+MACD diario:      {ind1d.macd.signal}
+EMA 20/50/200:    ${ind1d.ema_20:,.2f} / ${ind1d.ema_50:,.2f} / ${ind1d.ema_200:,.2f}
+Dirección diaria: {ind1d.suggested_direction}
+Alineación 1h/1d: {'✅ ALINEADOS' if ind1d.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN MAYOR'}"""
 
         prompt = f"""=== SEÑAL DE TRADING DETECTADA ===
 
@@ -131,7 +144,7 @@ Bollinger Bands:    {ind.bollinger.signal} — precio al {ind.bollinger.percent_
 Volumen:            {ind.volume.ratio:.2f}x el promedio ({ind.volume.signal})
 EMA 20/50/200:      ${ind.ema_20:,.2f} / ${ind.ema_50:,.2f} / ${ind.ema_200:,.2f}
 Tendencia general:  {ind.trend}
-{confirmation_4h}
+{confirmation_4h}{daily_context}
 
 === NIVELES DE PRECIO ===
 Soporte más cercano:      {nearest_support} ({support_dist})
