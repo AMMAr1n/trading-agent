@@ -75,6 +75,10 @@ class TradingAgent:
                 id=f"report_{hour:02d}h"
             )
 
+        # ── Cargar posiciones abiertas de DB al iniciar ──────────────────
+        await self._restore_tracked_positions()
+        # ──────────────────────────────────────────────────────────────────
+
         self.scheduler.start()
         logger.info(
             f"Agente listo | Loop: cada {LOOP_INTERVAL_MIN} min | "
@@ -170,19 +174,7 @@ class TradingAgent:
         result = await self.executor.execute_decision(decision, balance)
 
         if result and result.success:
-            # ── Registrar en monitor de posiciones ───────────────────────
-            self.monitor.register(
-                symbol=result.symbol,
-                direction=result.direction,
-                quantity=result.quantity,
-                entry_price=result.entry_price,
-                stop_loss=result.stop_loss,
-                take_profit=result.take_profit,
-                amount_usd=decision.amount_usd,
-                trade_id=trade_id,
-            )
-            # ─────────────────────────────────────────────────────────────
-
+            # ── Registrar en DB primero para obtener trade_id ─────────────
             trade_id = self.db.open_trade(TradeRecord(
                 id=None, symbol=decision.symbol,
                 direction=decision.direction,
@@ -201,6 +193,71 @@ class TradingAgent:
                 close_reason=None, order_id=result.order_id
             ))
             logger.info(f"Operación registrada en DB: ID {trade_id}")
+
+            # ── Registrar en monitor con trade_id correcto ────────────────
+            self.monitor.register(
+                symbol=result.symbol,
+                direction=result.direction,
+                quantity=result.quantity,
+                entry_price=result.entry_price,
+                stop_loss=result.stop_loss,
+                take_profit=result.take_profit,
+                amount_usd=decision.amount_usd,
+                trade_id=trade_id,
+            )
+
+
+    async def _restore_tracked_positions(self):
+        """
+        Al iniciar, carga posiciones abiertas de DB y las registra en el monitor.
+        Si una posición ya no está en Binance, la cierra en DB automáticamente.
+        """
+        try:
+            open_trades = self.db.get_open_trades()
+            if not open_trades:
+                logger.info("No hay posiciones abiertas en DB para restaurar")
+                return
+
+            raw_positions = await self.collector.binance.exchange.fetch_positions()
+            open_in_binance = set()
+            for p in raw_positions:
+                if p.get("contracts") and float(p["contracts"]) > 0:
+                    # Guardar tanto el símbolo ccxt como el símbolo limpio
+                    open_in_binance.add(p["symbol"])
+                    base = p["symbol"].split("/")[0] if "/" in p["symbol"] else p["symbol"].replace("USDT", "")
+                    open_in_binance.add(base + "USDT")
+
+            restored = 0
+            for trade in open_trades:
+                symbol = trade["symbol"]
+                if symbol in open_in_binance:
+                    entry_price = trade.get("entry_price", 0) or 0
+                    amount_usd  = trade.get("amount_usd", 0) or 0
+                    quantity    = amount_usd / entry_price if entry_price > 0 else 0
+                    self.monitor.register(
+                        symbol=symbol,
+                        direction=trade.get("direction", "long"),
+                        quantity=quantity,
+                        entry_price=entry_price,
+                        stop_loss=trade.get("stop_loss", 0) or 0,
+                        take_profit=trade.get("take_profit", 0) or 0,
+                        amount_usd=amount_usd,
+                        trade_id=trade["id"],
+                    )
+                    restored += 1
+                    logger.info(f"Posición restaurada: {symbol} | DB ID={trade['id']}")
+                else:
+                    logger.info(f"Posición {symbol} (ID {trade['id']}) no está en Binance — cerrando en DB")
+                    self.db.close_trade(
+                        trade_id=trade["id"],
+                        exit_price=0, pnl_usd=0, pnl_pct=0,
+                        close_reason="no_encontrada_al_reiniciar"
+                    )
+
+            logger.info(f"Posiciones restauradas: {restored}/{len(open_trades)}")
+
+        except Exception as e:
+            logger.error(f"Error restaurando posiciones: {e}")
 
     async def send_periodic_report(self):
         now = datetime.now().strftime("%H:%M")
