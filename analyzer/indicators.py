@@ -142,6 +142,7 @@ class TechnicalIndicators:
     ema_20: float          # Media móvil exponencial 20 períodos
     ema_50: float          # Media móvil exponencial 50 períodos
     ema_200: float         # Media móvil exponencial 200 períodos (tendencia mayor)
+    atr_14: float = 0.0    # Average True Range 14 períodos — volatilidad real del activo
 
     @property
     def trend(self) -> str:
@@ -404,6 +405,20 @@ class TechnicalIndicatorCalculator:
             logger.error(f"Error calculando EMAs: {e}")
             return 0.0, 0.0, 0.0
 
+    def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calcula el ATR (Average True Range) — volatilidad real del activo."""
+        try:
+            atr = ta.volatility.AverageTrueRange(
+                high=df["high"],
+                low=df["low"],
+                close=df["close"],
+                window=period
+            ).average_true_range()
+            return float(atr.iloc[-1])
+        except Exception as e:
+            logger.error(f"Error calculando ATR: {e}")
+            return 0.0
+
     def calculate(
         self,
         symbol: str,
@@ -432,6 +447,7 @@ class TechnicalIndicatorCalculator:
             bollinger = self.calculate_bollinger(df)
             volume = self.calculate_volume(df)
             ema_20, ema_50, ema_200 = self.calculate_emas(df)
+            atr_14 = self.calculate_atr(df)
 
             if not all([rsi, macd, bollinger, volume]):
                 logger.warning(f"Indicadores incompletos para {symbol}/{timeframe}")
@@ -448,6 +464,7 @@ class TechnicalIndicatorCalculator:
                 ema_20=ema_20,
                 ema_50=ema_50,
                 ema_200=ema_200,
+                atr_14=atr_14,
             )
 
             logger.debug(

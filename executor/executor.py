@@ -18,6 +18,12 @@ from .order_executor import OrderExecutor, OrderResult
 load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
+# Position sizing — Fixed Fractional method (Position Sizer skill)
+# Nunca arriesgar más del RISK_PCT del capital operable por trade
+RISK_PCT = float(os.getenv("RISK_PCT", "1.0")) / 100   # default 1%
+# ATR multiplier para calcular distancia al stop (Turtle Traders: 2x)
+ATR_MULTIPLIER = float(os.getenv("ATR_MULTIPLIER", "1.5"))  # 1.5x para swing corto
+
 
 class TradingExecutor:
 
@@ -40,37 +46,83 @@ class TradingExecutor:
         self.alert_orange_pct = float(os.getenv("ALERT_ORANGE_PCT", "20")) / 100
         self.alert_red_pct    = float(os.getenv("ALERT_RED_PCT",    "10")) / 100
         self.vobo_timeout_min = int(os.getenv("VOBO_TIMEOUT_MIN", "10"))
-        # Máximo % del capital total a comprometer en posiciones simultáneas
         self.max_capital_pct  = float(os.getenv("MAX_CAPITAL_PCT", "60")) / 100
 
         self._daily_starting_balance: Optional[float] = None
         self._last_alert_level: Optional[str] = None
         self._daily_trades = []
-
-        # Capital comprometido en posiciones abiertas (rastreado por el bot)
         self._committed_usd: float = 0.0
 
         logger.info(
             f"TradingExecutor inicializado | "
             f"Modo: {'TESTNET' if testnet else 'PRODUCCION'} | "
             f"Notificaciones: {'ON' if self.notifications_enabled else 'OFF'} | "
-            f"Capital máximo simultáneo: {self.max_capital_pct*100:.0f}%"
+            f"Capital máximo simultáneo: {self.max_capital_pct*100:.0f}% | "
+            f"Riesgo por trade: {RISK_PCT*100:.1f}%"
         )
 
     def commit_capital(self, amount_usd: float):
-        """Registra capital comprometido al abrir una posición."""
         self._committed_usd += amount_usd
         logger.info(f"Capital comprometido: ${self._committed_usd:.2f} USD")
 
     def release_capital(self, amount_usd: float):
-        """Libera capital cuando se cierra una posición."""
         self._committed_usd = max(0.0, self._committed_usd - amount_usd)
         logger.info(f"Capital liberado. Comprometido ahora: ${self._committed_usd:.2f} USD")
 
     def available_capital(self, balance: BalanceInfo) -> float:
-        """Capital disponible para nuevas posiciones."""
         max_allowed = balance.usdt_free * self.max_capital_pct
         return max(0.0, max_allowed - self._committed_usd)
+
+    def _calculate_position_size(
+        self,
+        decision: TradeDecision,
+        balance: BalanceInfo,
+        capital_disponible: float
+    ) -> float:
+        """
+        Calcula el tamaño de posición usando Fixed Fractional method.
+
+        Basado en Position Sizer skill:
+        - dollar_risk = capital_operable * RISK_PCT (1% por defecto)
+        - Si hay ATR: stop_distance = ATR * ATR_MULTIPLIER
+          amount = dollar_risk / stop_distance * entry_price
+        - Si no hay ATR: usa porcentaje de capital según volumen (método anterior)
+
+        El skill recomienda nunca exceder 2% de riesgo. Con $29 capital:
+        - 1% riesgo = $0.29 máximo a perder por trade
+        - Esto es muy conservador pero correcto para cuentas pequeñas
+        """
+        dollar_risk = balance.operable * RISK_PCT
+        atr = getattr(decision, 'atr_14', 0.0) or 0.0
+
+        if atr > 0 and decision.stop_loss > 0:
+            # ── ATR-based sizing ──────────────────────────────────────────
+            stop_distance = atr * ATR_MULTIPLIER
+            entry_price   = decision.stop_loss  # aproximado pre-fill
+
+            if stop_distance > 0 and entry_price > 0:
+                # Cuántas unidades podemos comprar dado el riesgo en USD
+                units = dollar_risk / stop_distance
+                amount_atr = units * entry_price
+
+                logger.info(
+                    f"ATR sizing: ATR={atr:.4f} | "
+                    f"Stop dist={stop_distance:.4f} ({ATR_MULTIPLIER}x ATR) | "
+                    f"Dollar risk=${dollar_risk:.2f} ({RISK_PCT*100:.1f}%) | "
+                    f"Monto ATR=${amount_atr:.2f}"
+                )
+                return amount_atr
+        
+        # ── Fallback: Fixed Fractional por volumen ────────────────────────
+        volume_ratio = getattr(decision, 'volume_ratio', 1.0) or 1.0
+        if volume_ratio < 0.5:
+            return balance.operable * 0.15
+        elif volume_ratio < 0.8:
+            return balance.operable * 0.20
+        elif volume_ratio < 1.2:
+            return balance.operable * 0.30
+        else:
+            return balance.operable * 0.40
 
     async def check_balance(self) -> Optional[BalanceInfo]:
         balance = await self.balance_checker.get_balance()
@@ -119,31 +171,20 @@ class TradingExecutor:
         capital_disponible = self.available_capital(balance)
         if capital_disponible < MIN_TRADE_AMOUNT_USD:
             logger.warning(
-                f"Capital disponible para nuevas posiciones: ${capital_disponible:.2f} — "
-                f"ya hay ${self._committed_usd:.2f} comprometidos. Saltando {decision.symbol}."
+                f"Capital disponible: ${capital_disponible:.2f} — "
+                f"comprometido: ${self._committed_usd:.2f}. Saltando {decision.symbol}."
             )
             return None
-        # ──────────────────────────────────────────────────────────────────
 
-        if decision.amount_usd > balance.operable:
-            decision.amount_usd = balance.operable * 0.4
+        # ── Calcular tamaño de posición con Fixed Fractional / ATR ────────
+        decision.amount_usd = self._calculate_position_size(
+            decision, balance, capital_disponible
+        )
 
-        volume_ratio = 1.0
-        try:
-            volume_ratio = getattr(decision, 'volume_ratio', 1.0) or 1.0
-        except Exception:
-            pass
+        # Nunca superar el capital disponible
+        decision.amount_usd = min(decision.amount_usd, capital_disponible)
 
-        if volume_ratio < 0.5:
-            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.15)
-        elif volume_ratio < 0.8:
-            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.20)
-        elif volume_ratio < 1.2:
-            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.30)
-        else:
-            decision.amount_usd = min(decision.amount_usd, balance.operable * 0.40)
-
-        # Subir al mínimo absoluto si quedó muy bajo
+        # Subir al mínimo si quedó por debajo
         if decision.amount_usd < MIN_TRADE_AMOUNT_USD:
             if balance.operable >= MIN_TRADE_AMOUNT_USD:
                 logger.info(
@@ -153,18 +194,15 @@ class TradingExecutor:
                 decision.amount_usd = MIN_TRADE_AMOUNT_USD
             else:
                 logger.warning(
-                    f"Capital operable (${balance.operable:.2f}) insuficiente "
-                    f"para el mínimo de ${MIN_TRADE_AMOUNT_USD:.2f} — saltando {decision.symbol}"
+                    f"Capital insuficiente para el mínimo — saltando {decision.symbol}"
                 )
                 return None
 
-        # No superar el capital disponible para nuevas posiciones
-        decision.amount_usd = min(decision.amount_usd, capital_disponible)
-
         logger.warning(
             f"Monto final: ${decision.amount_usd:.2f} "
-            f"(operable: ${balance.operable:.2f}, comprometido: ${self._committed_usd:.2f}, "
-            f"disponible: ${capital_disponible:.2f}, volumen: {volume_ratio:.1f}x)"
+            f"(operable: ${balance.operable:.2f}, "
+            f"comprometido: ${self._committed_usd:.2f}, "
+            f"disponible: ${capital_disponible:.2f})"
         )
 
         if decision.is_autonomous:
@@ -199,9 +237,7 @@ class TradingExecutor:
         result = await self.order_executor.execute(decision)
 
         if result.success:
-            # Registrar capital comprometido
             self.commit_capital(decision.amount_usd)
-
             self._daily_trades.append({
                 "symbol":      decision.symbol,
                 "direction":   decision.direction,
@@ -264,7 +300,6 @@ class TradingExecutor:
         close_reason: str,
         amount_usd: float = 0.0
     ):
-        # Liberar capital al cerrar
         if amount_usd > 0:
             self.release_capital(amount_usd)
 
@@ -291,7 +326,7 @@ class TradingExecutor:
         self._daily_starting_balance = None
         self._daily_trades = []
         self._last_alert_level = None
-        self._committed_usd = 0.0  # reset diario
+        self._committed_usd = 0.0
 
     async def _check_capital_alerts(self, balance: BalanceInfo):
         if not self._daily_starting_balance:
