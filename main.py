@@ -64,6 +64,7 @@ class TradingAgent:
             order_executor=self.executor.order_executor,
             notifier=self.executor.notifier if self.executor.notifications_enabled else None,
             trading_executor=self.executor,
+            db=self.db,
         )
         # ──────────────────────────────────────────────────────────────────
 
@@ -178,6 +179,7 @@ class TradingAgent:
                 stop_loss=result.stop_loss,
                 take_profit=result.take_profit,
                 amount_usd=decision.amount_usd,
+                trade_id=trade_id,
             )
             # ─────────────────────────────────────────────────────────────
 

@@ -4,7 +4,6 @@ position_monitor.py — Monitor de posiciones abiertas
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 import ccxt.async_support as ccxt
 
@@ -13,11 +12,13 @@ logger = logging.getLogger(__name__)
 
 class PositionMonitor:
 
-    def __init__(self, exchange: ccxt.binance, order_executor=None, notifier=None, trading_executor=None):
+    def __init__(self, exchange: ccxt.binance, order_executor=None, notifier=None,
+                 trading_executor=None, db=None):
         self.exchange         = exchange
         self.order_executor   = order_executor
         self.notifier         = notifier
-        self.trading_executor = trading_executor  # para liberar capital al cerrar
+        self.trading_executor = trading_executor
+        self.db               = db        # ← DB para sincronizar cierres
         self._tracked: dict   = {}
 
     def register(
@@ -29,6 +30,7 @@ class PositionMonitor:
         stop_loss: float,
         take_profit: float,
         amount_usd: float = 0.0,
+        trade_id: int = None,   # ← ID en la DB para poder cerrarla
     ):
         self._tracked[symbol] = {
             "direction":   direction,
@@ -37,9 +39,13 @@ class PositionMonitor:
             "stop_loss":   stop_loss,
             "take_profit": take_profit,
             "amount_usd":  amount_usd,
+            "trade_id":    trade_id,
             "opened_at":   datetime.now(timezone.utc),
         }
-        logger.info(f"PositionMonitor: registrada {symbol} {direction.upper()} | SL=${stop_loss} TP=${take_profit}")
+        logger.info(
+            f"PositionMonitor: registrada {symbol} {direction.upper()} | "
+            f"SL=${stop_loss} TP=${take_profit} | DB ID={trade_id}"
+        )
 
     async def run(self):
         if not self._tracked:
@@ -53,8 +59,8 @@ class PositionMonitor:
                 if p.get("contracts") and float(p["contracts"]) > 0
             }
 
-            open_orders    = await self.exchange.fetch_open_orders()
-            orders_by_sym  = {}
+            open_orders   = await self.exchange.fetch_open_orders()
+            orders_by_sym = {}
             for o in open_orders:
                 orders_by_sym.setdefault(o["symbol"], []).append(o["type"].lower())
 
@@ -62,16 +68,17 @@ class PositionMonitor:
 
             for symbol, meta in self._tracked.items():
 
-                # 1. Posición ya cerrada por Binance
+                # 1. Posición cerrada en Binance → cerrar en DB y notificar
                 if symbol not in open_symbols:
-                    logger.info(f"PositionMonitor: {symbol} cerrada por Binance")
+                    logger.info(f"PositionMonitor: {symbol} cerrada en Binance")
                     await self._notify_closed(symbol, meta)
+                    self._close_in_db(symbol, meta)
                     if self.trading_executor:
                         self.trading_executor.release_capital(meta.get("amount_usd", 0))
                     symbols_to_remove.append(symbol)
                     continue
 
-                # 2. Verificar SL/TP
+                # 2. Verificar SL/TP presentes
                 existing = orders_by_sym.get(symbol, [])
                 has_sl   = any("stop" in t for t in existing)
                 has_tp   = any("take_profit" in t for t in existing)
@@ -86,12 +93,17 @@ class PositionMonitor:
                             stop_loss=meta["stop_loss"],
                             take_profit=meta["take_profit"],
                         )
-                        if ok and self.notifier:
-                            self.notifier.notify_critical_error(
-                                f"✅ {symbol}: SL/TP repuestos automáticamente por el monitor."
-                            )
+                        if self.notifier:
+                            if ok:
+                                self.notifier.notify_critical_error(
+                                    f"sl/tp {symbol}: SL/TP repuestos automáticamente."
+                                )
+                            else:
+                                self.notifier.notify_critical_error(
+                                    f"sl/tp {symbol}: No se pudieron reponer SL/TP. "
+                                    f"Cierra manualmente si es necesario."
+                                )
                 else:
-                    # 3. Cierre de emergencia si precio cruzó SL/TP
                     await self._check_emergency_close(symbol, meta, symbols_to_remove)
 
             for sym in symbols_to_remove:
@@ -99,6 +111,36 @@ class PositionMonitor:
 
         except Exception as e:
             logger.error(f"PositionMonitor: error en ciclo: {e}")
+
+    def _close_in_db(self, symbol: str, meta: dict):
+        """Cierra la posición en la DB cuando Binance la cierra."""
+        if not self.db:
+            return
+        trade_id = meta.get("trade_id")
+        if not trade_id:
+            # Buscar por símbolo en las abiertas
+            try:
+                trades = self.db.get_open_trades()
+                for t in trades:
+                    if t["symbol"] == symbol:
+                        trade_id = t["id"]
+                        break
+            except Exception as e:
+                logger.error(f"PositionMonitor: error buscando trade en DB: {e}")
+                return
+
+        if trade_id:
+            try:
+                self.db.close_trade(
+                    trade_id=trade_id,
+                    exit_price=0,    # el monitor no sabe el precio exacto de cierre
+                    pnl_usd=0,
+                    pnl_pct=0,
+                    close_reason="cerrada_por_binance"
+                )
+                logger.info(f"PositionMonitor: trade ID {trade_id} cerrado en DB")
+            except Exception as e:
+                logger.error(f"PositionMonitor: error cerrando trade en DB: {e}")
 
     async def _check_emergency_close(self, symbol: str, meta: dict, symbols_to_remove: list):
         try:
@@ -126,9 +168,9 @@ class PositionMonitor:
                 close_side = "sell" if direction == "long" else "buy"
                 await self.exchange.create_order(
                     symbol=symbol, type="market", side=close_side,
-                    amount=meta["quantity"],
-                    params={"reduceOnly": True}
+                    amount=meta["quantity"], params={"reduceOnly": True}
                 )
+                self._close_in_db(symbol, meta)
                 if self.trading_executor:
                     self.trading_executor.release_capital(meta.get("amount_usd", 0))
                 if self.notifier:
