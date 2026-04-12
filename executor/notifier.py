@@ -352,13 +352,18 @@ class TelegramNotifier:
             f"¡Hasta el próximo reporte! 🚀"
         )
 
-    def notify_agent_started(self, balance: float, operable: float = 0.0) -> bool:
-        operable_line = f"Monto operable: <b>${operable:.2f} USDT</b>\n" if operable > 0 else ""
+    def notify_agent_started(
+        self, balance: float, operable: float = 0.0,
+        margin_in_use: float = 0.0, reserve: float = 0.0
+    ) -> bool:
         return self.send(
             f"🤖 <b>AGENTE INICIADO</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"Saldo en cuenta: <b>${balance:.2f} USDT</b>\n"
-            f"{operable_line}"
+            f"💰 Saldo total: <b>${balance:.2f} USDT</b>\n"
+            f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>\n"
+            f"🏦 Reserva: <b>${reserve:.2f} USDT</b>\n"
+            f"✅ Saldo operable: <b>${operable:.2f} USDT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
             f"Monitoreando: BTC, ETH, SOL, BNB, DOGE, XRP, ADA\n"
             f"Te notificaré cada operación. 📱"
         )
