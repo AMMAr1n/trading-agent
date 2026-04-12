@@ -202,20 +202,32 @@ class PositionMonitor:
         if not self.notifier:
             return
         try:
-            ticker      = await self.exchange.fetch_ticker(symbol)
-            exit_price  = float(ticker["last"])
-            entry       = meta["entry_price"]
-            direction   = meta["direction"]
-            pnl         = (exit_price - entry) if direction == "long" else (entry - exit_price)
-            pnl        *= meta["quantity"]
-            pnl_pct     = ((exit_price - entry) / entry * 100) if direction == "long" \
-                          else ((entry - exit_price) / entry * 100)
-            dur_min     = int((datetime.now(timezone.utc) - meta["opened_at"]).total_seconds() / 60)
+            ticker     = await self.exchange.fetch_ticker(symbol)
+            exit_price = float(ticker["last"])
+            entry      = meta["entry_price"]
+            direction  = meta["direction"]
+            amount_usd = meta.get("amount_usd", 0)
+
+            pnl_pct = ((exit_price - entry) / entry * 100) if direction == "long" \
+                      else ((entry - exit_price) / entry * 100)
+            # P&L en USD basado en el monto invertido real
+            pnl_usd = amount_usd * (pnl_pct / 100)
+
+            # Saldo actualizado de Binance
+            balance_after = 0.0
+            try:
+                bal = await self.exchange.fetch_balance()
+                balance_after = float(bal.get("USDT", {}).get("free", 0) or 0)
+            except Exception:
+                pass
+
+            dur_min = int((datetime.now(timezone.utc) - meta["opened_at"]).total_seconds() / 60)
             self.notifier.notify_trade_closed(
                 symbol=symbol, direction=direction,
-                pnl_usd=round(pnl, 2), pnl_pct=round(pnl_pct, 2),
+                pnl_usd=round(pnl_usd, 2), pnl_pct=round(pnl_pct, 2),
                 duration_min=dur_min, close_reason="SL/TP ejecutado por Binance",
                 entry_price=entry, exit_price=exit_price,
+                account_balance_after=balance_after,
             )
         except Exception as e:
             logger.error(f"PositionMonitor: error notificando cierre de {symbol}: {e}")
