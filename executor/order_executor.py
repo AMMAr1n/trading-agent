@@ -85,83 +85,58 @@ class OrderExecutor:
                 leverage = int(decision.leverage.replace("x", ""))
                 await self.exchange.set_leverage(leverage, decision.symbol)
 
-            # ── Abrir posición con SL/TP incluidos en la misma orden ──────
+            # ── Abrir posición (sin SL/TP embebido — no funciona en ccxt futures) ──
             order = await self.exchange.create_order(
                 symbol=decision.symbol,
                 type="market",
                 side=side,
                 amount=quantity,
-                params={
-                    "stopLoss": {
-                        "type":      "STOP_MARKET",
-                        "stopPrice": decision.stop_loss,
-                    },
-                    "takeProfit": {
-                        "type":      "TAKE_PROFIT_MARKET",
-                        "stopPrice": decision.take_profit,
-                    },
-                }
             )
             # ──────────────────────────────────────────────────────────────
 
             order_id   = order.get("id", "unknown")
             fill_price = float(order.get("average", current_price) or current_price)
 
-            logger.info(
-                f"Orden ejecutada con SL/TP embebido: ID {order_id} | "
-                f"Precio: ${fill_price:,.4f} | "
-                f"SL: ${decision.stop_loss} | TP: ${decision.take_profit}"
+            logger.info(f"Posición abierta: ID {order_id} | Precio: ${fill_price:,.4f}")
+
+            # ── Colocar SL/TP via Algo API oficial de Binance ────────────
+            import asyncio as _asyncio
+            await _asyncio.sleep(1)  # dar tiempo a Binance para registrar la posición
+
+            sl_tp_ok = await self.place_sl_tp(
+                symbol=decision.symbol,
+                direction=decision.direction,
+                quantity=quantity,
+                stop_loss=decision.stop_loss,
+                take_profit=decision.take_profit,
             )
 
-            # ── Verificar que el SL/TP embebido fue aceptado ─────────────
-            # Si no, intentar reponerlos via Algo API como respaldo
-            import asyncio as _asyncio
-            await _asyncio.sleep(1)  # dar tiempo a Binance
-
-            sl_tp_error = order.get("info", {}).get("stopLossError") or                           order.get("info", {}).get("takeProfitError")
-
-            if sl_tp_error:
-                logger.warning(f"SL/TP embebido falló: {sl_tp_error} — intentando Algo API")
-                sl_tp_ok = await self.place_sl_tp(
-                    symbol=decision.symbol,
-                    direction=decision.direction,
-                    quantity=quantity,
-                    stop_loss=decision.stop_loss,
-                    take_profit=decision.take_profit,
+            if not sl_tp_ok:
+                # SL/TP falló — cerrar posición por seguridad
+                logger.error(f"SL/TP fallido — cerrando {decision.symbol} por seguridad")
+                close_side_emerg = "sell" if decision.direction == "long" else "buy"
+                await self.exchange.create_order(
+                    symbol=decision.symbol, type="market",
+                    side=close_side_emerg, amount=quantity,
+                    params={"reduceOnly": True}
                 )
-                if sl_tp_ok:
-                    # SL/TP repuesto exitosamente via Algo API
-                    if self.notifier:
-                        self.notifier.send(
-                            f"⚠️ <b>SL/TP REPUESTO — {decision.symbol}</b>\n"
-                            f"El SL/TP embebido falló pero fue repuesto via Algo API.\n"
-                            f"SL: ${decision.stop_loss:,.4f} | TP: ${decision.take_profit:,.4f}\n"
-                            f"Posición protegida correctamente. ✅"
-                        )
-                else:
-                    # SL/TP falló definitivamente — cerrar posición por seguridad
-                    logger.error(f"SL/TP fallido definitivamente — cerrando {decision.symbol}")
-                    close_side = "sell" if decision.direction == "long" else "buy"
-                    await self.exchange.create_order(
-                        symbol=decision.symbol, type="market",
-                        side=close_side, amount=quantity,
-                        params={"reduceOnly": True}
+                if self.notifier:
+                    self.notifier.send(
+                        f"🚨 <b>POSICIÓN CERRADA POR SEGURIDAD — {decision.symbol}</b>\n"
+                        f"No fue posible colocar SL/TP via Algo API.\n"
+                        f"La posición fue cerrada automáticamente para evitar pérdidas sin límite.\n"
+                        f"Precio de entrada: ${fill_price:,.4f} | Cierre inmediato."
                     )
-                    if self.notifier:
-                        self.notifier.send(
-                            f"🚨 <b>POSICIÓN CERRADA POR SEGURIDAD — {decision.symbol}</b>\n"
-                            f"No fue posible colocar SL/TP (ni embebido ni Algo API).\n"
-                            f"La posición fue cerrada automáticamente para evitar pérdidas sin límite.\n"
-                            f"Precio de entrada: ${fill_price:,.4f} | Cierre inmediato."
-                        )
-                    return OrderResult(
-                        success=False, order_id=order_id,
-                        symbol=decision.symbol, direction=decision.direction,
-                        amount_usd=decision.amount_usd, entry_price=fill_price,
-                        stop_loss=decision.stop_loss, take_profit=decision.take_profit,
-                        quantity=quantity,
-                        error_msg="SL/TP falló — posición cerrada por seguridad"
-                    )
+                return OrderResult(
+                    success=False, order_id=order_id,
+                    symbol=decision.symbol, direction=decision.direction,
+                    amount_usd=decision.amount_usd, entry_price=fill_price,
+                    stop_loss=decision.stop_loss, take_profit=decision.take_profit,
+                    quantity=quantity,
+                    error_msg="SL/TP falló — posición cerrada por seguridad"
+                )
+
+            logger.info(f"SL/TP colocados: SL=${decision.stop_loss} | TP=${decision.take_profit}")
             # ──────────────────────────────────────────────────────────────
 
             return OrderResult(
@@ -207,49 +182,52 @@ class OrderExecutor:
         take_profit: float,
     ) -> bool:
         """
-        Repone SL/TP usando el nuevo Algo Order API de Binance.
-        Desde 2025-12-09, STOP_MARKET y TAKE_PROFIT_MARKET requieren
-        el endpoint /fapi/v1/algoOrder — usamos closePosition=true
-        para no necesitar calcular la cantidad exacta.
+        Coloca SL/TP via POST /fapi/v1/algoOrder (Algo API oficial de Binance).
+        Desde 2025-12-09 es el único endpoint válido para órdenes condicionales
+        en Futuros USD-M. Parámetros según documentación oficial de Binance.
         """
+        # En One-way Mode: close_side es opuesto a la dirección de la posición
         close_side = "SELL" if direction == "long" else "BUY"
+        raw_symbol = symbol.replace("/", "").replace(":USDT", "")
         sl_ok = False
         tp_ok = False
 
         # ── Stop Loss via Algo API ────────────────────────────────────────
         try:
             await self.exchange.fapiPrivatePostAlgoOrder({
-                "symbol":        symbol.replace("/", "").replace(":USDT", ""),
-                "side":          close_side,
-                "positionSide":  "BOTH",
-                "type":          "STOP",
-                "quantity":      quantity,
-                "stopPrice":     stop_loss,
-                "workingType":   "MARK_PRICE",
-                "reduceOnly":    "true",
-                "timeInForce":   "GTE_GTC",
+                "algoType":    "CONDITIONAL",
+                "symbol":      raw_symbol,
+                "side":        close_side,
+                "positionSide": "BOTH",
+                "type":        "STOP_MARKET",
+                "quantity":    quantity,
+                "triggerPrice": stop_loss,
+                "workingType": "MARK_PRICE",
+                "reduceOnly":  "true",
+                "timeInForce": "GTC",
             })
-            logger.info(f"SL repuesto via Algo API: ${stop_loss:,.4f}")
+            logger.info(f"SL colocado via Algo API: ${stop_loss:,.4f}")
             sl_ok = True
         except Exception as e:
-            logger.error(f"Error reponiendo SL para {symbol}: {e}")
+            logger.error(f"Error colocando SL para {symbol}: {e}")
 
         # ── Take Profit via Algo API ──────────────────────────────────────
         try:
             await self.exchange.fapiPrivatePostAlgoOrder({
-                "symbol":        symbol.replace("/", "").replace(":USDT", ""),
-                "side":          close_side,
-                "positionSide":  "BOTH",
-                "type":          "TAKE_PROFIT",
-                "quantity":      quantity,
-                "stopPrice":     take_profit,
-                "workingType":   "MARK_PRICE",
-                "reduceOnly":    "true",
-                "timeInForce":   "GTE_GTC",
+                "algoType":    "CONDITIONAL",
+                "symbol":      raw_symbol,
+                "side":        close_side,
+                "positionSide": "BOTH",
+                "type":        "TAKE_PROFIT_MARKET",
+                "quantity":    quantity,
+                "triggerPrice": take_profit,
+                "workingType": "MARK_PRICE",
+                "reduceOnly":  "true",
+                "timeInForce": "GTC",
             })
-            logger.info(f"TP repuesto via Algo API: ${take_profit:,.4f}")
+            logger.info(f"TP colocado via Algo API: ${take_profit:,.4f}")
             tp_ok = True
         except Exception as e:
-            logger.error(f"Error reponiendo TP para {symbol}: {e}")
+            logger.error(f"Error colocando TP para {symbol}: {e}")
 
         return sl_ok and tp_ok
