@@ -290,7 +290,8 @@ class TradingAgent:
                 starting_balance=self.executor._daily_starting_balance or current_balance,
                 ending_balance=current_balance
             )
-            await self.executor.send_daily_report(current_balance)
+            open_positions = self.db.get_open_trades()
+            await self.executor.send_daily_report(current_balance, open_positions=open_positions)
             logger.info(
                 f"Reporte enviado ({now}): {summary['total_trades']} operaciones | "
                 f"P&L: ${summary['total_pnl_usd']:.2f}"

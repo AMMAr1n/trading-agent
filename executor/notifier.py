@@ -1,6 +1,5 @@
 """
 notifier.py — Notificaciones por Telegram
-Responsabilidad: enviar todos los mensajes al operador via Telegram Bot.
 """
 
 import logging
@@ -13,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_MAX_CHARS = 4000  # Límite seguro (Telegram permite 4096)
+TELEGRAM_MAX_CHARS = 4000
 
 
 class TelegramNotifier:
@@ -31,16 +30,12 @@ class TelegramNotifier:
         logger.info("TelegramNotifier inicializado")
 
     def send(self, message: str) -> bool:
-        """Envía un mensaje. Si supera el límite, lo divide automáticamente."""
         if len(message) <= TELEGRAM_MAX_CHARS:
             return self._send_single(message)
-        
-        # Dividir en partes
         parts = []
         while message:
             parts.append(message[:TELEGRAM_MAX_CHARS])
             message = message[TELEGRAM_MAX_CHARS:]
-        
         success = True
         for i, part in enumerate(parts, 1):
             suffix = f"\n<i>(Mensaje {i}/{len(parts)})</i>" if len(parts) > 1 else ""
@@ -89,35 +84,59 @@ class TelegramNotifier:
     ) -> bool:
         arrow = "📈" if direction == "long" else "📉"
         direction_str = "SUBE (LONG)" if direction == "long" else "BAJA (SHORT)"
-        monto_operacion = trade_amount if trade_amount > 0 else amount_usd
+        monto = trade_amount if trade_amount > 0 else amount_usd
 
-        # Mensaje 1 — datos de la operación
+        # ── Fix #1: usar entry_price real, no stop_loss ───────────────────
+        # entry_price se pasa desde _execute_autonomous como result.entry_price
+        precio_entrada = entry_price
+
+        # ── Fix #2: calcular P&L estimado ────────────────────────────────
+        if precio_entrada > 0 and stop_loss > 0 and take_profit > 0:
+            if direction == "long":
+                riesgo_pct  = (precio_entrada - stop_loss) / precio_entrada * 100
+                ganancia_pct = (take_profit - precio_entrada) / precio_entrada * 100
+            else:
+                riesgo_pct  = (stop_loss - precio_entrada) / precio_entrada * 100
+                ganancia_pct = (precio_entrada - take_profit) / precio_entrada * 100
+
+            riesgo_usd   = monto * (riesgo_pct / 100)
+            ganancia_usd = monto * (ganancia_pct / 100)
+            rr_ratio     = ganancia_pct / riesgo_pct if riesgo_pct > 0 else 0
+
+            pnl_lines = (
+                f"\n"
+                f"📊 <b>P&L ESTIMADO</b>\n"
+                f"✅ Si TP (${take_profit:,.4f}): <b>+${ganancia_usd:.2f} USD (+{ganancia_pct:.1f}%)</b>\n"
+                f"❌ Si SL (${stop_loss:,.4f}): <b>-${riesgo_usd:.2f} USD (-{riesgo_pct:.1f}%)</b>\n"
+                f"Ratio R/R: <b>1:{rr_ratio:.1f}</b>"
+            )
+        else:
+            pnl_lines = ""
+
         msg1 = (
             f"{arrow} <b>OPERACIÓN ABIERTA</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Activo: <b>{symbol}</b> — {direction_str}\n"
-            f"Precio de entrada: <b>${entry_price:,.4f}</b>\n"
+            f"Precio de entrada: <b>${precio_entrada:,.4f}</b>\n"
             f"Apalancamiento: <b>{leverage}</b>\n"
             f"\n"
             f"💰 <b>CAPITAL</b>\n"
             f"Saldo total en cuenta: <b>${account_balance:.2f} USDT</b>\n"
-            f"Monto asignado: <b>${monto_operacion:.2f} USDT</b>\n"
+            f"Monto asignado: <b>${monto:.2f} USDT</b>\n"
             f"\n"
             f"🎯 <b>NIVELES</b>\n"
             f"Stop-loss: <b>${stop_loss:,.4f}</b>\n"
             f"Take-profit: <b>${take_profit:,.4f}</b>"
+            f"{pnl_lines}"
         )
         self._send_single(msg1)
 
-        # Mensaje 2 — razonamiento completo
         if reasoning:
-            msg2 = (
+            self.send(
                 f"🧠 <b>RAZONAMIENTO — {symbol}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"{reasoning}"
             )
-            self.send(msg2)
-
         return True
 
     def notify_vobo_request(
@@ -136,7 +155,7 @@ class TelegramNotifier:
     ) -> bool:
         arrow = "📈" if direction == "long" else "📉"
         direction_str = "SUBE (LONG)" if direction == "long" else "BAJA (SHORT)"
-        monto_operacion = trade_amount if trade_amount > 0 else amount_usd
+        monto = trade_amount if trade_amount > 0 else amount_usd
 
         msg1 = (
             f"{arrow} <b>SOLICITUD DE APROBACIÓN</b>\n"
@@ -146,7 +165,7 @@ class TelegramNotifier:
             f"\n"
             f"💰 <b>CAPITAL</b>\n"
             f"Saldo total en cuenta: <b>${account_balance:.2f} USDT</b>\n"
-            f"Monto a usar: <b>${monto_operacion:.2f} USDT</b>\n"
+            f"Monto a usar: <b>${monto:.2f} USDT</b>\n"
             f"\n"
             f"🎯 <b>NIVELES</b>\n"
             f"Stop-loss: <b>${stop_loss:,.4f}</b>\n"
@@ -158,13 +177,11 @@ class TelegramNotifier:
         self._send_single(msg1)
 
         if reasoning:
-            msg2 = (
+            self.send(
                 f"🧠 <b>RAZONAMIENTO — {symbol}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"{reasoning}"
             )
-            self.send(msg2)
-
         return True
 
     def notify_trade_closed(
@@ -224,19 +241,15 @@ class TelegramNotifier:
             f"{actions[level]}"
         )
 
-    def notify_insufficient_amount(
-        self, symbol: str, amount_usd: float, min_required: float
-    ) -> bool:
-        """Monto calculado menor al mínimo de Binance para ese par."""
+    def notify_insufficient_amount(self, symbol: str, amount_usd: float, min_required: float) -> bool:
         return self.send(
             f"⚠️ <b>MONTO INSUFICIENTE — {symbol}</b>\n"
             f"Monto calculado: <b>${amount_usd:.2f} USDT</b>\n"
             f"Mínimo requerido por Binance: <b>${min_required:.2f} USDT</b>\n"
-            f"El agente saltó este par. Considera aumentar el capital o ajustar RISK_PCT."
+            f"El agente saltó este par."
         )
 
     def notify_connection_error(self, details: str) -> bool:
-        """Error de conexión con Binance."""
         return self.send(
             f"📡 <b>ERROR DE CONEXIÓN</b>\n"
             f"No se pudo conectar con Binance.\n"
@@ -245,7 +258,6 @@ class TelegramNotifier:
         )
 
     def notify_unexpected_error(self, context: str, details: str) -> bool:
-        """Error inesperado en el agente."""
         return self.send(
             f"🚨 <b>ERROR INESPERADO</b>\n"
             f"Contexto: {context}\n"
@@ -254,34 +266,15 @@ class TelegramNotifier:
         )
 
     def notify_critical_error(self, error_msg: str) -> bool:
-        """Mantener para compatibilidad — redirige al tipo correcto según el mensaje."""
         msg = error_msg.lower()
-
-        # Detectar tipo de error y usar el método apropiado
         if "minimum amount" in msg or "mínimo de costo" in msg or "monto" in msg:
-            return self.send(
-                f"⚠️ <b>MONTO INSUFICIENTE</b>\n"
-                f"{error_msg[:300]}\n"
-                f"El agente saltó este par."
-            )
+            return self.send(f"⚠️ <b>MONTO INSUFICIENTE</b>\n{error_msg[:300]}\nEl agente saltó este par.")
         elif "network" in msg or "conexión" in msg or "connect" in msg:
-            return self.send(
-                f"📡 <b>ERROR DE CONEXIÓN</b>\n"
-                f"{error_msg[:300]}\n"
-                f"El agente reintentará en el próximo ciclo."
-            )
+            return self.send(f"📡 <b>ERROR DE CONEXIÓN</b>\n{error_msg[:300]}\nEl agente reintentará en el próximo ciclo.")
         elif "sl/tp" in msg or "stop" in msg or "protección" in msg:
-            return self.send(
-                f"⚠️ <b>POSICIÓN SIN PROTECCIÓN</b>\n"
-                f"{error_msg[:300]}\n"
-                f"El monitor intentará reponer SL/TP en el próximo ciclo."
-            )
+            return self.send(f"⚠️ <b>POSICIÓN SIN PROTECCIÓN</b>\n{error_msg[:300]}\nEl monitor intentará reponer SL/TP.")
         else:
-            return self.send(
-                f"🚨 <b>ERROR CRÍTICO DEL AGENTE</b>\n"
-                f"{error_msg[:300]}\n"
-                f"Revisa el servidor — el agente puede estar detenido."
-            )
+            return self.send(f"🚨 <b>ERROR CRÍTICO DEL AGENTE</b>\n{error_msg[:300]}\nRevisa el servidor.")
 
     def notify_vobo_timeout(self, symbol: str, amount_usd: float) -> bool:
         return self.send(
@@ -299,18 +292,39 @@ class TelegramNotifier:
         total_pnl: float,
         win_rate: float,
         starting_balance: float,
-        ending_balance: float
+        ending_balance: float,
+        open_positions: list = None
     ) -> bool:
         balance_change = ending_balance - starting_balance
         sign  = "+" if balance_change >= 0 else ""
         emoji = "✅" if total_pnl >= 0 else "❌"
+
+        # ── Fix #6: posiciones abiertas en el reporte ─────────────────────
+        positions_section = ""
+        if open_positions:
+            positions_section = "\n\n📂 <b>POSICIONES ABIERTAS</b>\n"
+            for pos in open_positions:
+                symbol    = pos.get("symbol", "")
+                entry     = pos.get("entry_price", 0)
+                sl        = pos.get("stop_loss", 0)
+                tp        = pos.get("take_profit", 0)
+                amount    = pos.get("amount_usd", 0)
+                direction = pos.get("direction", "long")
+                arrow     = "📈" if direction == "long" else "📉"
+                positions_section += (
+                    f"{arrow} <b>{symbol}</b> | Entrada: ${entry:,.4f} | "
+                    f"Monto: ${amount:.2f}\n"
+                    f"   SL: ${sl:,.4f} | TP: ${tp:,.4f}\n"
+                )
+
         return self.send(
             f"📊 <b>RESUMEN DEL DÍA — {date}</b>\n"
             f"{emoji} P&L: <b>{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USD</b>\n"
             f"Operaciones: {total_trades} | Ganadoras: {winning_trades} | Perdedoras: {losing_trades}\n"
             f"Win rate: {win_rate:.0f}%\n"
-            f"Saldo: ${starting_balance:.2f} → <b>${ending_balance:.2f} USD</b> ({sign}${balance_change:.2f})\n"
-            f"¡Hasta mañana! 🚀"
+            f"Saldo: ${starting_balance:.2f} → <b>${ending_balance:.2f} USD</b> ({sign}${balance_change:.2f})"
+            f"{positions_section}\n"
+            f"¡Hasta el próximo reporte! 🚀"
         )
 
     def notify_agent_started(self, balance: float, operable: float = 0.0) -> bool:

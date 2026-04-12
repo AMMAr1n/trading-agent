@@ -237,24 +237,24 @@ class TradingExecutor:
             f"{decision.direction.upper()} ${decision.amount_usd:.2f}"
         )
 
-        if self.notifications_enabled and os.getenv("NOTIFY_ON_ENTRY", "true") == "true":
-            self.notifier.notify_trade_opened(
-                symbol=decision.symbol,
-                direction=decision.direction,
-                amount_usd=decision.amount_usd,
-                entry_price=decision.stop_loss,
-                stop_loss=decision.stop_loss,
-                take_profit=decision.take_profit,
-                leverage=decision.leverage,
-                reasoning=decision.reasoning,
-                account_balance=balance.usdt_free,
-                trade_amount=decision.amount_usd
-            )
-
         result = await self.order_executor.execute(decision)
 
         if result.success:
             self.commit_capital(decision.amount_usd)
+            # Notificar con precio REAL de ejecución
+            if self.notifications_enabled and os.getenv("NOTIFY_ON_ENTRY", "true") == "true":
+                self.notifier.notify_trade_opened(
+                    symbol=decision.symbol,
+                    direction=decision.direction,
+                    amount_usd=decision.amount_usd,
+                    entry_price=result.entry_price,   # precio real de Binance
+                    stop_loss=decision.stop_loss,
+                    take_profit=decision.take_profit,
+                    leverage=decision.leverage,
+                    reasoning=decision.reasoning,
+                    account_balance=balance.usdt_free,
+                    trade_amount=decision.amount_usd
+                )
             self._daily_trades.append({
                 "symbol":      decision.symbol,
                 "direction":   decision.direction,
@@ -327,7 +327,7 @@ class TradingExecutor:
                 duration_min=duration_min, close_reason=close_reason
             )
 
-    async def send_daily_report(self, current_balance: float):
+    async def send_daily_report(self, current_balance: float, open_positions: list = None):
         if not self.notifications_enabled:
             return
         starting     = self._daily_starting_balance or current_balance
@@ -338,7 +338,8 @@ class TradingExecutor:
             total_trades=total_trades,
             winning_trades=0, losing_trades=0,
             total_pnl=total_pnl, win_rate=0.0,
-            starting_balance=starting, ending_balance=current_balance
+            starting_balance=starting, ending_balance=current_balance,
+            open_positions=open_positions or []
         )
         self._daily_starting_balance = None
         self._daily_trades = []
