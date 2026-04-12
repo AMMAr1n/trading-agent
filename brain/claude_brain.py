@@ -78,21 +78,33 @@ class ClaudeBrain:
         prompt = self.prompt_builder.build(signal, snapshot, available_capital)
 
         try:
-            # Llamar a Claude API
+            # Llamar a Claude API con web search habilitado
             response = self.client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=MAX_TOKENS,
                 system=SYSTEM_PROMPT,
+                tools=[{"type": "web_search_20250305", "name": "web_search"}],
                 messages=[
                     {"role": "user", "content": prompt}
                 ]
             )
 
-            # Extraer el texto de la respuesta
+            # Extraer el texto de la respuesta (puede incluir tool_use blocks)
             if not response.content:
                 logger.error("Claude devolvió respuesta vacía")
                 return None
-            response_text = response.content[0].text.strip()
+
+            # Buscar el bloque de texto con el JSON (ignorar tool_use blocks)
+            response_text = None
+            for block in response.content:
+                if hasattr(block, "text") and block.text.strip():
+                    response_text = block.text.strip()
+                    break
+
+            if not response_text:
+                logger.error("Claude no devolvió texto en la respuesta")
+                return None
+
             logger.debug(f"Respuesta de Claude: {response_text[:200]}...")
 
             # Parsear el JSON

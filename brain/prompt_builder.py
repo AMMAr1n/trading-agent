@@ -128,6 +128,7 @@ EMA 20/50/200:    ${ind1d.ema_20:,.2f} / ${ind1d.ema_50:,.2f} / ${ind1d.ema_200:
 Dirección diaria: {ind1d.suggested_direction}
 Alineación 1h/1d: {'✅ ALINEADOS' if ind1d.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN MAYOR'}"""
 
+        search_hint = signal.symbol.replace("USDT", "")
         prompt = f"""=== SEÑAL DE TRADING DETECTADA ===
 
 ACTIVO: {signal.symbol}
@@ -178,11 +179,18 @@ Guía de tamaño según tipo de mercado:
 Recuerda: no esperes el trade perfecto. Un trader profesional opera en todos los mercados
 adaptando el tamaño. Si las señales son razonables aunque no perfectas, opera con tamaño reducido.
 
+IMPORTANTE — BÚSQUEDA WEB:
+Tienes acceso a web_search. ÚSALO para buscar noticias recientes ANTES de decidir.
+Busca: "{search_hint} news today" o "{search_hint} price prediction" o eventos relevantes.
+Si encuentras noticias negativas importantes (hack, regulación, dump ballena) → NO operes.
+Si encuentras noticias positivas (partnership, listing, upgrade) → considera aumentar tamaño.
+
 Analiza:
-1. ¿El setup técnico justifica una entrada ahora?
-2. ¿Qué tamaño es apropiado dado el tipo de mercado?
-3. ¿Dónde poner el stop-loss basado en niveles reales?
-4. ¿Qué apalancamiento corresponde al score y volumen actuales?
+1. ¿Qué dicen las noticias recientes sobre {search_hint}?
+2. ¿El setup técnico justifica una entrada ahora?
+3. ¿Qué tamaño es apropiado dado el tipo de mercado y las noticias?
+4. ¿Dónde poner el stop-loss basado en niveles reales?
+5. ¿Qué apalancamiento corresponde al score y volumen actuales?
 
 Responde solo con el JSON."""
 
