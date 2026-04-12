@@ -337,8 +337,8 @@ class TradingAgent:
                     margin_in_use=balance.margin_in_use,
                     reserve=balance.reserve,
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Error enviando mensaje de inicio: {e}")
 
         logger.info(f"Agente corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
         while self.running:
