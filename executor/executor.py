@@ -42,6 +42,9 @@ class TradingExecutor:
             self.notifier = None
             self.notifications_enabled = False
 
+        # Pasar notifier al order_executor para alertas de SL/TP
+        self.order_executor.notifier = self.notifier
+
         self.alert_yellow_pct = float(os.getenv("ALERT_YELLOW_PCT", "30")) / 100
         self.alert_orange_pct = float(os.getenv("ALERT_ORANGE_PCT", "20")) / 100
         self.alert_red_pct    = float(os.getenv("ALERT_RED_PCT",    "10")) / 100
