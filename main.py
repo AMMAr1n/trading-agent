@@ -332,7 +332,10 @@ class TradingAgent:
             balance = await self.executor.check_balance()
             if balance and self.executor.notifications_enabled:
                 self.executor.notifier.notify_agent_started(
-                    balance.usdt_free, balance.operable
+                    balance=balance.usdt_total,
+                    operable=balance.operable,
+                    margin_in_use=balance.margin_in_use,
+                    reserve=balance.reserve,
                 )
         except Exception:
             pass
