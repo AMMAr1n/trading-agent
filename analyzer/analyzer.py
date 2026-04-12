@@ -224,10 +224,8 @@ class TechnicalAnalyzer:
         if direction == "neutral":
             return None
 
-        # Spot solo puede ser LONG
+        # Todos los pares son futuros perpetuos — LONG y SHORT permitidos
         trading_mode = self.get_trading_mode(symbol)
-        if trading_mode != "futures" and direction == "short":
-            return None
 
         context_bonus = self.calculate_context_bonus(snapshot, direction)
 

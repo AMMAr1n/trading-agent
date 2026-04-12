@@ -11,17 +11,13 @@ from pydantic import BaseModel, field_validator
 
 # ─── ACTIVOS DEL PORTAFOLIO ────────────────────────────────────────────────────
 
-# Futuros (solo BTC)
-FUTURES_SYMBOLS = ["BTCUSDT"]
+# Futuros perpetuos USD-M — todos los pares, LONG y SHORT
+FUTURES_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "XRPUSDT", "ADAUSDT"]
 
-# Spot Tier 1 — alta liquidez, senales tecnicas
-SPOT_TIER1 = ["ETHUSDT", "SOLUSDT", "BNBUSDT"]
-
-# Spot Tier 2 — volatilidad media, tecnico + sentimiento
-SPOT_TIER2 = ["DOGEUSDT", "XRPUSDT", "ADAUSDT"]
-
-# Spot Tier 3 — memecoins, solo con score muy alto
-SPOT_TIER3 = []  # PEPE y SHIB son Spot — pendiente implementar
+# Spot — deshabilitado, todos operan como futuros perpetuos
+SPOT_TIER1 = []
+SPOT_TIER2 = []
+SPOT_TIER3 = []
 
 # Todos los activos que el colector debe monitorear
 ALL_SYMBOLS = FUTURES_SYMBOLS + SPOT_TIER1 + SPOT_TIER2 + SPOT_TIER3
