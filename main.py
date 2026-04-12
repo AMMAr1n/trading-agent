@@ -141,11 +141,29 @@ class TradingAgent:
 
             logger.info(f"{len(analysis.signals)} señal(es) detectada(s)")
 
+            # Obtener pares ya abiertos en Binance (evitar duplicados)
+            try:
+                raw_pos = await self.collector.binance.exchange.fetch_positions()
+                open_symbols_binance = set()
+                for p in raw_pos:
+                    if p.get("contracts") and float(p["contracts"]) > 0:
+                        # Normalizar símbolo: XRP/USDT:USDT -> XRPUSDT
+                        sym = p["symbol"]
+                        base = sym.split("/")[0] if "/" in sym else sym
+                        open_symbols_binance.add(base + "USDT")
+            except Exception:
+                open_symbols_binance = set()
+
             for signal in analysis.signals[:3]:
-                open_count = self.db.get_open_trades_count()
+                open_count = open_trades  # usar conteo de Binance
                 if open_count >= max_trades:
                     break
+                # Saltar si ya hay posición abierta de este par en Binance
+                if signal.symbol in open_symbols_binance:
+                    logger.info(f"Saltando {signal.symbol} — ya hay posición abierta en Binance")
+                    continue
                 await self.process_signal(signal, balance, snapshot)
+                open_trades += 1  # actualizar conteo local
 
         except Exception as e:
             logger.error(f"Error en ciclo de trading: {e}")

@@ -167,6 +167,23 @@ class TradingExecutor:
             logger.info(f"Claude decidió no operar: {decision.reason_not_trade}")
             return None
 
+        # ── Verificar que no hay posición abierta del mismo par en Binance ─
+        try:
+            positions = await self.exchange.fetch_positions()
+            for p in positions:
+                if p.get("contracts") and float(p["contracts"]) > 0:
+                    sym = p["symbol"]
+                    base = sym.split("/")[0] if "/" in sym else sym
+                    binance_symbol = base + "USDT"
+                    if binance_symbol == decision.symbol:
+                        logger.info(
+                            f"Par {decision.symbol} ya tiene posición abierta en Binance — saltando"
+                        )
+                        return None
+        except Exception as e:
+            logger.warning(f"No se pudo verificar posiciones en Binance: {e}")
+        # ──────────────────────────────────────────────────────────────────
+
         # ── Control de capital comprometido ───────────────────────────────
         capital_disponible = self.available_capital(balance)
         if capital_disponible < MIN_TRADE_AMOUNT_USD:
