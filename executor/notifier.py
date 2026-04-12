@@ -304,22 +304,42 @@ class TelegramNotifier:
         sign  = "+" if balance_change >= 0 else ""
         emoji = "✅" if total_pnl >= 0 else "❌"
 
-        # ── Fix #6: posiciones abiertas en el reporte ─────────────────────
+        # ── Fix #6: posiciones abiertas con distancias ───────────────────────
         positions_section = ""
         if open_positions:
-            positions_section = "\n\n📂 <b>POSICIONES ABIERTAS</b>\n"
+            positions_section = "\n\n📂 <b>POSICIONES ABIERTAS</b>"
             for pos in open_positions:
                 symbol    = pos.get("symbol", "")
-                entry     = pos.get("entry_price", 0)
-                sl        = pos.get("stop_loss", 0)
-                tp        = pos.get("take_profit", 0)
-                amount    = pos.get("amount_usd", 0)
+                entry     = pos.get("entry_price", 0) or 0
+                sl        = pos.get("stop_loss", 0) or 0
+                tp        = pos.get("take_profit", 0) or 0
+                amount    = pos.get("amount_usd", 0) or 0
                 direction = pos.get("direction", "long")
+                current   = pos.get("current_price", entry) or entry
                 arrow     = "📈" if direction == "long" else "📉"
+
+                # P&L actual
+                if entry > 0 and current > 0:
+                    pnl_pct = ((current - entry) / entry * 100) if direction == "long" \
+                              else ((entry - current) / entry * 100)
+                    pnl_usd = amount * (pnl_pct / 100)
+                    sign_pnl = "+" if pnl_pct >= 0 else ""
+                    pnl_str = f"{sign_pnl}{pnl_usd:.2f} USD ({sign_pnl}{pnl_pct:.1f}%)"
+                else:
+                    pnl_str = "N/A"
+
+                # Distancias a SL y TP
+                dist_sl_pct = abs((entry - sl) / entry * 100) if entry > 0 and sl > 0 else 0
+                dist_sl_usd = amount * (dist_sl_pct / 100)
+                dist_tp_pct = abs((tp - entry) / entry * 100) if entry > 0 and tp > 0 else 0
+                dist_tp_usd = amount * (dist_tp_pct / 100)
+
                 positions_section += (
-                    f"{arrow} <b>{symbol}</b> | Entrada: ${entry:,.4f} | "
-                    f"Monto: ${amount:.2f}\n"
-                    f"   SL: ${sl:,.4f} | TP: ${tp:,.4f}\n"
+                    f"\n\n{arrow} <b>{symbol}</b> | ${amount:.2f} USD\n"
+                    f"Entrada: ${entry:,.4f} | Actual: ${current:,.4f}\n"
+                    f"P&L: <b>{pnl_str}</b>\n"
+                    f"✅ TP: ${tp:,.4f} (+{dist_tp_pct:.1f}% / +${dist_tp_usd:.2f})\n"
+                    f"❌ SL: ${sl:,.4f} (-{dist_sl_pct:.1f}% / -${dist_sl_usd:.2f})"
                 )
 
         return self.send(

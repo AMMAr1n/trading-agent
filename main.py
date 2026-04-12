@@ -294,6 +294,14 @@ class TradingAgent:
                 ending_balance=current_balance
             )
             open_positions = self.db.get_open_trades()
+            # Enriquecer con precio actual de Binance
+            if open_positions:
+                try:
+                    for pos in open_positions:
+                        ticker = await self.collector.binance.exchange.fetch_ticker(pos["symbol"])
+                        pos["current_price"] = float(ticker["last"])
+                except Exception:
+                    pass
             await self.executor.send_daily_report(current_balance, open_positions=open_positions)
             logger.info(
                 f"Reporte enviado ({now}): {summary['total_trades']} operaciones | "
