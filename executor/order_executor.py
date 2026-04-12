@@ -2,11 +2,16 @@
 order_executor.py — Ejecutor de órdenes en Binance
 """
 
+import hmac
+import hashlib
 import logging
+import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 import ccxt.async_support as ccxt
+import httpx
 
 from brain.decision import TradeDecision
 
@@ -173,6 +178,13 @@ class OrderExecutor:
                 quantity=0, error_msg=error
             )
 
+    def _sign(self, params: dict) -> str:
+        """Firma los parámetros con HMAC SHA256 para Binance API."""
+        secret = os.getenv("BINANCE_API_SECRET", "")
+        query  = "&".join(f"{k}={v}" for k, v in params.items())
+        sig    = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+        return query + f"&signature={sig}"
+
     async def place_sl_tp(
         self,
         symbol: str,
@@ -182,52 +194,69 @@ class OrderExecutor:
         take_profit: float,
     ) -> bool:
         """
-        Coloca SL/TP via POST /fapi/v1/algoOrder (Algo API oficial de Binance).
-        Desde 2025-12-09 es el único endpoint válido para órdenes condicionales
-        en Futuros USD-M. Parámetros según documentación oficial de Binance.
+        Coloca SL/TP via POST /fapi/v1/algoOrder con httpx directo.
+        Desde 2025-12-09, Binance Futuros USD-M requiere el Algo API
+        para órdenes condicionales. fapiPrivatePostAlgoOrder no existe
+        en ccxt, por lo que se llama directamente con httpx + HMAC sign.
         """
-        # En One-way Mode: close_side es opuesto a la dirección de la posición
+        api_key    = os.getenv("BINANCE_API_KEY", "")
         close_side = "SELL" if direction == "long" else "BUY"
         raw_symbol = symbol.replace("/", "").replace(":USDT", "")
+        url        = "https://fapi.binance.com/fapi/v1/algoOrder"
+        headers    = {
+            "X-MBX-APIKEY":  api_key,
+            "Content-Type":  "application/x-www-form-urlencoded",
+        }
         sl_ok = False
         tp_ok = False
 
-        # ── Stop Loss via Algo API ────────────────────────────────────────
-        try:
-            await self.exchange.fapiPrivatePostAlgoOrder({
-                "algoType":    "CONDITIONAL",
-                "symbol":      raw_symbol,
-                "side":        close_side,
-                "positionSide": "BOTH",
-                "type":        "STOP_MARKET",
-                "quantity":    quantity,
-                "triggerPrice": stop_loss,
-                "workingType": "MARK_PRICE",
-                "reduceOnly":  "true",
-                "timeInForce": "GTC",
-            })
-            logger.info(f"SL colocado via Algo API: ${stop_loss:,.4f}")
-            sl_ok = True
-        except Exception as e:
-            logger.error(f"Error colocando SL para {symbol}: {e}")
+        async with httpx.AsyncClient(timeout=10) as client:
+            # ── Stop Loss ─────────────────────────────────────────────────
+            try:
+                sl_params = {
+                    "algoType":     "CONDITIONAL",
+                    "symbol":       raw_symbol,
+                    "side":         close_side,
+                    "positionSide": "BOTH",
+                    "type":         "STOP_MARKET",
+                    "quantity":     quantity,
+                    "triggerPrice": stop_loss,
+                    "workingType":  "MARK_PRICE",
+                    "reduceOnly":   "true",
+                    "timeInForce":  "GTC",
+                    "timestamp":    int(time.time() * 1000),
+                }
+                r = await client.post(url, content=self._sign(sl_params), headers=headers)
+                if r.status_code == 200:
+                    logger.info(f"SL colocado via Algo API: ${stop_loss:,.4f}")
+                    sl_ok = True
+                else:
+                    logger.error(f"Error colocando SL {symbol}: {r.status_code} {r.text}")
+            except Exception as e:
+                logger.error(f"Error colocando SL para {symbol}: {e}")
 
-        # ── Take Profit via Algo API ──────────────────────────────────────
-        try:
-            await self.exchange.fapiPrivatePostAlgoOrder({
-                "algoType":    "CONDITIONAL",
-                "symbol":      raw_symbol,
-                "side":        close_side,
-                "positionSide": "BOTH",
-                "type":        "TAKE_PROFIT_MARKET",
-                "quantity":    quantity,
-                "triggerPrice": take_profit,
-                "workingType": "MARK_PRICE",
-                "reduceOnly":  "true",
-                "timeInForce": "GTC",
-            })
-            logger.info(f"TP colocado via Algo API: ${take_profit:,.4f}")
-            tp_ok = True
-        except Exception as e:
-            logger.error(f"Error colocando TP para {symbol}: {e}")
+            # ── Take Profit ───────────────────────────────────────────────
+            try:
+                tp_params = {
+                    "algoType":     "CONDITIONAL",
+                    "symbol":       raw_symbol,
+                    "side":         close_side,
+                    "positionSide": "BOTH",
+                    "type":         "TAKE_PROFIT_MARKET",
+                    "quantity":     quantity,
+                    "triggerPrice": take_profit,
+                    "workingType":  "MARK_PRICE",
+                    "reduceOnly":   "true",
+                    "timeInForce":  "GTC",
+                    "timestamp":    int(time.time() * 1000),
+                }
+                r = await client.post(url, content=self._sign(tp_params), headers=headers)
+                if r.status_code == 200:
+                    logger.info(f"TP colocado via Algo API: ${take_profit:,.4f}")
+                    tp_ok = True
+                else:
+                    logger.error(f"Error colocando TP {symbol}: {r.status_code} {r.text}")
+            except Exception as e:
+                logger.error(f"Error colocando TP para {symbol}: {e}")
 
         return sl_ok and tp_ok
