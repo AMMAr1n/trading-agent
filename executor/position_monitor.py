@@ -18,7 +18,7 @@ class PositionMonitor:
         self.order_executor   = order_executor
         self.notifier         = notifier
         self.trading_executor = trading_executor
-        self.db               = db        # ← DB para sincronizar cierres
+        self.db               = db
         self._tracked: dict   = {}
 
     def register(
@@ -30,7 +30,7 @@ class PositionMonitor:
         stop_loss: float,
         take_profit: float,
         amount_usd: float = 0.0,
-        trade_id: int = None,   # ← ID en la DB para poder cerrarla
+        trade_id: int = None,
     ):
         self._tracked[symbol] = {
             "direction":   direction,
@@ -59,17 +59,41 @@ class PositionMonitor:
                 if p.get("contracts") and float(p["contracts"]) > 0
             }
 
-            open_orders   = await self.exchange.fetch_open_orders()
+            # ── Fix: obtener open orders POR SÍMBOLO para evitar rate limit ──
+            # En vez de fetch_open_orders() sin símbolo, consultamos por cada par
             orders_by_sym = {}
-            for o in open_orders:
-                orders_by_sym.setdefault(o["symbol"], []).append(o["type"].lower())
+            for symbol in list(self._tracked.keys()):
+                try:
+                    # Convertir XRPUSDT → XRP/USDT:USDT para ccxt
+                    ccxt_symbol = None
+                    for s in open_symbols:
+                        base = s.split("/")[0] if "/" in s else s.replace("USDT", "")
+                        if base + "USDT" == symbol:
+                            ccxt_symbol = s
+                            break
+                    if not ccxt_symbol:
+                        ccxt_symbol = symbol  # fallback
+
+                    orders = await self.exchange.fetch_open_orders(ccxt_symbol)
+                    orders_by_sym[symbol] = [o["type"].lower() for o in orders]
+                except Exception:
+                    orders_by_sym[symbol] = []
+            # ──────────────────────────────────────────────────────────────────
 
             symbols_to_remove = []
 
             for symbol, meta in self._tracked.items():
 
-                # 1. Posición cerrada en Binance → cerrar en DB y notificar
-                if symbol not in open_symbols:
+                # Normalizar símbolo para comparar con open_symbols de Binance
+                binance_sym = None
+                for s in open_symbols:
+                    base = s.split("/")[0] if "/" in s else s.replace("USDT", "")
+                    if base + "USDT" == symbol:
+                        binance_sym = s
+                        break
+
+                # 1. Posición cerrada en Binance
+                if binance_sym not in open_symbols and symbol not in open_symbols:
                     logger.info(f"PositionMonitor: {symbol} cerrada en Binance")
                     await self._notify_closed(symbol, meta)
                     self._close_in_db(symbol, meta)
@@ -78,33 +102,15 @@ class PositionMonitor:
                     symbols_to_remove.append(symbol)
                     continue
 
-                # 2. Verificar SL/TP presentes
+                # 2. Verificar SL/TP — con SL/TP embebido no aparecen en open orders
+                # Solo intentar reponer si hay un error explícito, no por ausencia
                 existing = orders_by_sym.get(symbol, [])
                 has_sl   = any("stop" in t for t in existing)
                 has_tp   = any("take_profit" in t for t in existing)
 
-                if not has_sl or not has_tp:
-                    logger.warning(f"PositionMonitor: {symbol} sin SL/TP — reponiendo...")
-                    if self.order_executor:
-                        ok = await self.order_executor.place_sl_tp(
-                            symbol=symbol,
-                            direction=meta["direction"],
-                            quantity=meta["quantity"],
-                            stop_loss=meta["stop_loss"],
-                            take_profit=meta["take_profit"],
-                        )
-                        if self.notifier:
-                            if ok:
-                                self.notifier.notify_critical_error(
-                                    f"sl/tp {symbol}: SL/TP repuestos automáticamente."
-                                )
-                            else:
-                                self.notifier.notify_critical_error(
-                                    f"sl/tp {symbol}: No se pudieron reponer SL/TP. "
-                                    f"Cierra manualmente si es necesario."
-                                )
-                else:
-                    await self._check_emergency_close(symbol, meta, symbols_to_remove)
+                # Con método embebido Binance gestiona SL/TP internamente
+                # Solo hacer cierre de emergencia si el precio cruza los niveles
+                await self._check_emergency_close(symbol, meta, symbols_to_remove)
 
             for sym in symbols_to_remove:
                 self._tracked.pop(sym, None)
@@ -113,12 +119,10 @@ class PositionMonitor:
             logger.error(f"PositionMonitor: error en ciclo: {e}")
 
     def _close_in_db(self, symbol: str, meta: dict):
-        """Cierra la posición en la DB cuando Binance la cierra."""
         if not self.db:
             return
         trade_id = meta.get("trade_id")
         if not trade_id:
-            # Buscar por símbolo en las abiertas
             try:
                 trades = self.db.get_open_trades()
                 for t in trades:
@@ -133,7 +137,7 @@ class PositionMonitor:
             try:
                 self.db.close_trade(
                     trade_id=trade_id,
-                    exit_price=0,    # el monitor no sabe el precio exacto de cierre
+                    exit_price=0,
                     pnl_usd=0,
                     pnl_pct=0,
                     close_reason="cerrada_por_binance"
@@ -148,6 +152,9 @@ class PositionMonitor:
             current_price = float(ticker["last"])
             direction     = meta["direction"]
             sl, tp        = meta["stop_loss"], meta["take_profit"]
+
+            if not sl or not tp:
+                return
 
             should_close = False
             reason       = ""
