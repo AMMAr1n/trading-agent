@@ -189,6 +189,9 @@ class TradingAgent:
             logger.info(f"Claude no opera {signal.symbol}: {decision.reason_not_trade}")
             return
 
+        # Pasar score al decision para mensajes de error informativos
+        decision.score = signal.score
+
         result = await self.executor.execute_decision(decision, balance)
 
         if result and result.success:

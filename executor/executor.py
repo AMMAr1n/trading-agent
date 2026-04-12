@@ -273,9 +273,23 @@ class TradingExecutor:
         else:
             logger.error(f"Fallo al abrir operacion: {result.error_msg}")
             if self.notifications_enabled:
-                self.notifier.notify_critical_error(
-                    f"Error al ejecutar orden {decision.symbol}: {result.error_msg}"
-                )
+                error_msg = result.error_msg or ""
+                if "mínimo de binance" in error_msg.lower() or "min_cost" in error_msg.lower() or "menor al mínimo" in error_msg.lower():
+                    # Extraer monto mínimo del mensaje de error
+                    try:
+                        min_req = float(error_msg.split("$")[2].split(")")[0])
+                    except Exception:
+                        min_req = 0.0
+                    self.notifier.notify_insufficient_amount(
+                        symbol=decision.symbol,
+                        amount_usd=decision.amount_usd,
+                        min_required=min_req,
+                        score=getattr(decision, "score", 0.0),
+                    )
+                else:
+                    self.notifier.notify_critical_error(
+                        f"Error al ejecutar orden {decision.symbol}: {result.error_msg}"
+                    )
 
         return result
 

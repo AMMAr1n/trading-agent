@@ -241,12 +241,17 @@ class TelegramNotifier:
             f"{actions[level]}"
         )
 
-    def notify_insufficient_amount(self, symbol: str, amount_usd: float, min_required: float) -> bool:
+    def notify_insufficient_amount(
+        self, symbol: str, amount_usd: float,
+        min_required: float, score: float = 0.0
+    ) -> bool:
+        score_line = f"Score de la señal: <b>{score:.0f}/100</b>\n" if score > 0 else ""
         return self.send(
             f"⚠️ <b>MONTO INSUFICIENTE — {symbol}</b>\n"
+            f"{score_line}"
             f"Monto calculado: <b>${amount_usd:.2f} USDT</b>\n"
             f"Mínimo requerido por Binance: <b>${min_required:.2f} USDT</b>\n"
-            f"El agente saltó este par."
+            f"El agente saltó este par. Considera depositar más capital."
         )
 
     def notify_connection_error(self, details: str) -> bool:

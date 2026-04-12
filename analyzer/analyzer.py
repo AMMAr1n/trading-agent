@@ -243,14 +243,43 @@ class TechnicalAnalyzer:
             )
             return None
 
-        # Filtro diario — tendencia mayor (más permisivo que 2h)
+        # ── Modificador 1D — tendencia mayor ajusta score y tamaño ─────────
+        # En vez de descartar, penaliza el score según la contradicción
+        daily_penalty = 0.0
+        daily_context = ""
         if indicators_1d:
             direction_1d = indicators_1d.suggested_direction
+            trend_1d     = indicators_1d.trend
+
             if direction_1d != "neutral" and direction_1d != direction:
+                # Contradicción mayor: reducir score significativamente
+                if "strong" in trend_1d:
+                    daily_penalty = 25.0  # strong_downtrend contra LONG → -25 pts
+                    daily_context = f"strong_downtrend diario"
+                else:
+                    daily_penalty = 15.0  # downtrend moderado → -15 pts
+                    daily_context = f"downtrend diario"
+
+                score_ajustado = score.total - daily_penalty
+                if score_ajustado < MIN_SCORE:
+                    logger.info(
+                        f"{symbol} — Score ajustado por {daily_context}: "
+                        f"{score.total:.0f} - {daily_penalty:.0f} = {score_ajustado:.0f} "
+                        f"(mínimo {MIN_SCORE}) — señal descartada"
+                    )
+                    return None
+
                 logger.info(
-                    f"{symbol} — Tendencia diaria ({direction_1d}) contradice 1h ({direction}) — señal descartada"
+                    f"{symbol} — Penalización por {daily_context}: "
+                    f"score {score.total:.0f} → {score_ajustado:.0f}"
                 )
-                return None
+                # Reducir score para que Claude sepa que hay contradicción
+                score.total = round(score_ajustado, 1)
+            elif direction_1d == direction:
+                # Alineación diaria — bonus +5 pts
+                score.total = min(round(score.total + 5, 1), 100.0)
+                logger.info(f"{symbol} — Bonus por alineación diaria: score → {score.total:.0f}")
+        # ──────────────────────────────────────────────────────────────────
 
         # Confirmación con timeframe 2h
         if indicators_4h:
