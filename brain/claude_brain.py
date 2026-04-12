@@ -85,67 +85,31 @@ class ClaudeBrain:
 
         try:
             # Llamar a Claude API con web search habilitado
-            # El web search requiere un loop: Claude puede hacer búsquedas antes de responder
-            messages = [{"role": "user", "content": prompt}]
-            tools = [{"type": "web_search_20250305", "name": "web_search"}]
+            # web_search_20250305 es un server-side tool — la API maneja la búsqueda
+            # internamente y devuelve todo en una sola respuesta con end_turn
+            response = self.client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=MAX_TOKENS,
+                system=SYSTEM_PROMPT,
+                tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                messages=[{"role": "user", "content": prompt}]
+            )
 
+            if not response.content:
+                logger.error("Claude devolvió respuesta vacía")
+                return None
+
+            # Extraer texto — ignorar bloques tool_use y tool_result
+            # El JSON de decisión siempre viene en un bloque de tipo "text"
             response_text = None
-            max_iterations = 5  # máximo de búsquedas web permitidas
-
-            for iteration in range(max_iterations):
-                response = self.client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
-                    tools=tools,
-                    messages=messages
-                )
-
-                if not response.content:
-                    logger.error("Claude devolvió respuesta vacía")
-                    return None
-
-                # Si Claude terminó → extraer texto
-                if response.stop_reason == "end_turn":
-                    for block in response.content:
-                        if hasattr(block, "text") and block.text.strip():
-                            response_text = block.text.strip()
-                            break
-                    break
-
-                # Si Claude usó web search → continuar el loop
-                if response.stop_reason == "tool_use":
-                    # Agregar respuesta de Claude al historial
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.content
-                    })
-                    # Agregar resultados de tool use (web search ya los incluye)
-                    tool_results = []
-                    for block in response.content:
-                        if block.type == "tool_use":
-                            logger.info(f"Claude buscó en web: {block.input.get('query', '')}")
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": "Search completed"
-                            })
-                    if tool_results:
-                        messages.append({
-                            "role": "user",
-                            "content": tool_results
-                        })
-                    continue
-
-                # Otro stop_reason → intentar extraer texto
-                for block in response.content:
-                    if hasattr(block, "text") and block.text.strip():
-                        response_text = block.text.strip()
-                        break
-                break
+            for block in response.content:
+                block_type = getattr(block, "type", "")
+                if block_type == "text" and block.text and block.text.strip():
+                    response_text = block.text.strip()
+                    # Si hay múltiples bloques de texto, tomar el último (la decisión final)
 
             if not response_text:
-                logger.error("Claude no devolvió texto en la respuesta")
+                logger.error(f"Claude no devolvió texto. Bloques: {[getattr(b, 'type', '') for b in response.content]}")
                 return None
 
             logger.debug(f"Respuesta de Claude: {response_text[:200]}...")
