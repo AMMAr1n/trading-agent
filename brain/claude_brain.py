@@ -84,13 +84,13 @@ class ClaudeBrain:
         )
 
         try:
-            # Llamar a Claude API con web search habilitado
-            # web_search_20250305 es un server-side tool — requiere anthropic >= 0.49.0
+            # Llamar a Claude API sin web search para reducir costos
+            # Web search se reactivará cuando el agente sea rentable
+            # Contexto de noticias llega via CoinGecko y RSS feeds
             response = self.client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=MAX_TOKENS,
                 system=SYSTEM_PROMPT,
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
                 messages=[{"role": "user", "content": prompt}]
             )
 
@@ -98,7 +98,7 @@ class ClaudeBrain:
                 logger.error("Claude devolvió respuesta vacía")
                 return None
 
-            # Extraer texto — ignorar bloques tool_use y tool_result
+            # Extraer texto de la respuesta
             response_text = None
             for block in response.content:
                 block_type = getattr(block, "type", "")
