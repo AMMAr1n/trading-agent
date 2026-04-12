@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 from .binance import BinanceCollector
 from .coinmarketcap import CoinMarketCapCollector
+from .coingecko import CoinGeckoCollector
+from .rss_collector import RSSCollector
 from .models import CollectedSnapshot, WhaleAlert, ALL_SYMBOLS
 
 # Cargar variables de entorno desde el archivo .env
@@ -63,6 +65,8 @@ class DataCollector:
             testnet=self.testnet,
         )
         self.cmc = CoinMarketCapCollector(api_key=self.cmc_api_key)
+        self.coingecko = CoinGeckoCollector()
+        self.rss = RSSCollector()
 
         # Cache de noticias — se actualiza cada 30 minutos
         self._news_cache = None

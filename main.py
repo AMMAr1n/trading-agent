@@ -180,7 +180,23 @@ class TradingAgent:
             f"(score: {signal.score:.0f})"
         )
 
-        decision = self.brain.decide(signal, snapshot, balance.operable)
+        # Obtener sentimiento de CoinGecko y noticias RSS condicionalmente
+        coingecko_sentiment = None
+        rss_headlines = []
+        try:
+            coingecko_sentiment = await self.collector.coingecko.get_news_and_sentiment(signal.symbol)
+        except Exception as e:
+            logger.warning(f"CoinGecko no disponible para {signal.symbol}: {e}")
+        try:
+            rss_headlines = await self.collector.rss.get_news_for_symbol(signal.symbol)
+        except Exception as e:
+            logger.warning(f"RSS no disponible para {signal.symbol}: {e}")
+
+        decision = self.brain.decide(
+            signal, snapshot, balance.operable,
+            coingecko_sentiment=coingecko_sentiment,
+            rss_headlines=rss_headlines
+        )
         if not decision:
             logger.warning(f"Claude no pudo decidir para {signal.symbol}")
             return

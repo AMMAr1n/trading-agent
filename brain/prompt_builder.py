@@ -77,7 +77,9 @@ class PromptBuilder:
         self,
         signal: TradingSignal,
         snapshot: CollectedSnapshot,
-        available_capital: float
+        available_capital: float,
+        coingecko_sentiment: dict = None,
+        rss_headlines: list = None
     ) -> str:
         ctx = snapshot.market_context
         ind = signal.indicators_1h
@@ -161,6 +163,12 @@ Volumen 24h:      ${ctx.total_volume_24h_usd/1e9:.1f}B USD
 Fear & Greed:     {ctx.fear_greed_index}/100 — {ctx.fear_greed_label}
 Sentimiento:      {ctx.market_sentiment}
 
+=== NOTICIAS RECIENTES (RSS) ===
+{self._format_rss_headlines(rss_headlines or [], signal.symbol)}
+
+=== SENTIMIENTO DE COMUNIDAD (CoinGecko) ===
+{self._format_coingecko_sentiment(coingecko_sentiment, signal.symbol)}
+
 === ALERTAS DE BALLENAS (últimas 4h) ===
 {self._format_whale_alerts(snapshot)}
 
@@ -195,6 +203,22 @@ Analiza:
 Responde solo con el JSON."""
 
         return prompt
+
+    def _format_rss_headlines(self, headlines: list, symbol: str) -> str:
+        if not headlines:
+            return "Sin noticias recientes encontradas"
+        lines = [f"• {h}" for h in headlines[:5]]
+        return "
+".join(lines)
+
+    def _format_coingecko_sentiment(self, sentiment: dict, symbol: str) -> str:
+        if not sentiment:
+            return "No disponible en este ciclo"
+        return (
+            f"Sentimiento comunidad: {sentiment.get('sentiment_label', 'N/A')} | "
+            f"Bullish: {sentiment.get('sentiment_up', 0):.0f}% | "
+            f"Bearish: {sentiment.get('sentiment_down', 0):.0f}%"
+        )
 
     def _format_whale_alerts(self, snapshot: CollectedSnapshot) -> str:
         if not snapshot.whale_alerts:
