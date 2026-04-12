@@ -85,8 +85,7 @@ class ClaudeBrain:
 
         try:
             # Llamar a Claude API con web search habilitado
-            # web_search_20250305 es un server-side tool — la API maneja la búsqueda
-            # internamente y devuelve todo en una sola respuesta con end_turn
+            # web_search_20250305 es un server-side tool — requiere anthropic >= 0.49.0
             response = self.client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=MAX_TOKENS,
@@ -100,13 +99,11 @@ class ClaudeBrain:
                 return None
 
             # Extraer texto — ignorar bloques tool_use y tool_result
-            # El JSON de decisión siempre viene en un bloque de tipo "text"
             response_text = None
             for block in response.content:
                 block_type = getattr(block, "type", "")
                 if block_type == "text" and block.text and block.text.strip():
                     response_text = block.text.strip()
-                    # Si hay múltiples bloques de texto, tomar el último (la decisión final)
 
             if not response_text:
                 logger.error(f"Claude no devolvió texto. Bloques: {[getattr(b, 'type', '') for b in response.content]}")
