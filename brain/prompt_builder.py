@@ -208,8 +208,7 @@ Responde solo con el JSON."""
         if not headlines:
             return "Sin noticias recientes encontradas"
         lines = [f"• {h}" for h in headlines[:5]]
-        return "
-".join(lines)
+        return "\n".join(lines)
 
     def _format_coingecko_sentiment(self, sentiment: dict, symbol: str) -> str:
         if not sentiment:
