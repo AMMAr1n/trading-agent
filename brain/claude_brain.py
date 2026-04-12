@@ -58,7 +58,9 @@ class ClaudeBrain:
         self,
         signal: TradingSignal,
         snapshot: CollectedSnapshot,
-        available_capital: float
+        available_capital: float,
+        coingecko_sentiment: dict = None,
+        rss_headlines: list = None
     ) -> Optional[TradeDecision]:
         """
         Llama a Claude y obtiene una decisión de trading.
@@ -75,31 +77,72 @@ class ClaudeBrain:
         )
 
         # Construir el prompt
-        prompt = self.prompt_builder.build(signal, snapshot, available_capital)
+        prompt = self.prompt_builder.build(
+            signal, snapshot, available_capital,
+            coingecko_sentiment=coingecko_sentiment,
+            rss_headlines=rss_headlines or []
+        )
 
         try:
             # Llamar a Claude API con web search habilitado
-            response = self.client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            # El web search requiere un loop: Claude puede hacer búsquedas antes de responder
+            messages = [{"role": "user", "content": prompt}]
+            tools = [{"type": "web_search_20250305", "name": "web_search"}]
 
-            # Extraer el texto de la respuesta (puede incluir tool_use blocks)
-            if not response.content:
-                logger.error("Claude devolvió respuesta vacía")
-                return None
-
-            # Buscar el bloque de texto con el JSON (ignorar tool_use blocks)
             response_text = None
-            for block in response.content:
-                if hasattr(block, "text") and block.text.strip():
-                    response_text = block.text.strip()
+            max_iterations = 5  # máximo de búsquedas web permitidas
+
+            for iteration in range(max_iterations):
+                response = self.client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=MAX_TOKENS,
+                    system=SYSTEM_PROMPT,
+                    tools=tools,
+                    messages=messages
+                )
+
+                if not response.content:
+                    logger.error("Claude devolvió respuesta vacía")
+                    return None
+
+                # Si Claude terminó → extraer texto
+                if response.stop_reason == "end_turn":
+                    for block in response.content:
+                        if hasattr(block, "text") and block.text.strip():
+                            response_text = block.text.strip()
+                            break
                     break
+
+                # Si Claude usó web search → continuar el loop
+                if response.stop_reason == "tool_use":
+                    # Agregar respuesta de Claude al historial
+                    messages.append({
+                        "role": "assistant",
+                        "content": response.content
+                    })
+                    # Agregar resultados de tool use (web search ya los incluye)
+                    tool_results = []
+                    for block in response.content:
+                        if block.type == "tool_use":
+                            logger.info(f"Claude buscó en web: {block.input.get('query', '')}")
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": "Search completed"
+                            })
+                    if tool_results:
+                        messages.append({
+                            "role": "user",
+                            "content": tool_results
+                        })
+                    continue
+
+                # Otro stop_reason → intentar extraer texto
+                for block in response.content:
+                    if hasattr(block, "text") and block.text.strip():
+                        response_text = block.text.strip()
+                        break
+                break
 
             if not response_text:
                 logger.error("Claude no devolvió texto en la respuesta")
