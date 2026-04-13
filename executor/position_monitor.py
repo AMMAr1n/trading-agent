@@ -68,9 +68,11 @@ class PositionMonitor:
 
             for symbol, meta in self._tracked.items():
 
-                # 1. Posición cerrada en Binance → cerrar en DB y notificar
+                # 1. Posición cerrada en Binance → cancelar órdenes huérfanas, cerrar en DB y notificar
                 if symbol not in open_symbols:
                     logger.info(f"PositionMonitor: {symbol} cerrada en Binance")
+                    # Cancelar SL/TP huérfanos via Algo API para evitar posiciones involuntarias
+                    await self._cancel_algo_orders(symbol)
                     await self._notify_closed(symbol, meta)
                     self._close_in_db(symbol, meta)
                     if self.trading_executor:
@@ -197,6 +199,31 @@ class PositionMonitor:
 
         except Exception as e:
             logger.error(f"PositionMonitor: error en cierre de emergencia {symbol}: {e}")
+
+    async def _cancel_algo_orders(self, symbol: str):
+        """
+        Cancela todas las órdenes condicionales (Algo) abiertas para un símbolo.
+        Se llama cuando una posición se cierra para evitar que el SL/TP
+        huérfano abra una posición contraria involuntaria.
+        """
+        try:
+            raw_symbol = symbol.replace("/", "").replace(":USDT", "")
+            # Obtener órdenes algo abiertas para este símbolo
+            algo_orders = await self.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
+            orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
+            cancelled = 0
+            for order in orders:
+                algo_id = order.get("algoId") or order.get("orderId")
+                if algo_id:
+                    try:
+                        await self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
+                        cancelled += 1
+                    except Exception as e:
+                        logger.warning(f"PositionMonitor: no se pudo cancelar algo order {algo_id}: {e}")
+            if cancelled > 0:
+                logger.info(f"PositionMonitor: {cancelled} órdenes condicionales canceladas para {symbol}")
+        except Exception as e:
+            logger.warning(f"PositionMonitor: error cancelando órdenes algo para {symbol}: {e}")
 
     async def _notify_closed(self, symbol: str, meta: dict):
         if not self.notifier and not self.trading_executor:
