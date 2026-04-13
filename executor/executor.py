@@ -155,7 +155,11 @@ class TradingExecutor:
             if self.notifications_enabled:
                 self.notifier.notify_no_funds(
                     usdt_free=balance.usdt_free,
-                    min_required=balance.min_trade_amount
+                    min_required=balance.min_trade_amount,
+                    usdt_total=balance.usdt_total,
+                    margin_in_use=balance.margin_in_use,
+                    reserve=balance.reserve,
+                    operable=balance.operable,
                 )
             return None
 
@@ -250,13 +254,17 @@ class TradingExecutor:
                     symbol=decision.symbol,
                     direction=decision.direction,
                     amount_usd=decision.amount_usd,
-                    entry_price=result.entry_price,   # precio real de Binance
+                    entry_price=result.entry_price,
                     stop_loss=decision.stop_loss,
                     take_profit=decision.take_profit,
                     leverage=decision.leverage,
                     reasoning=decision.reasoning,
                     account_balance=balance.usdt_free,
-                    trade_amount=decision.amount_usd
+                    trade_amount=decision.amount_usd,
+                    usdt_total=balance.usdt_total,
+                    margin_in_use=balance.margin_in_use,
+                    reserve=balance.reserve,
+                    operable=balance.operable,
                 )
             self._daily_trades.append({
                 "symbol":      decision.symbol,
@@ -288,6 +296,10 @@ class TradingExecutor:
                         amount_usd=decision.amount_usd,
                         min_required=min_req,
                         score=getattr(decision, "score", 0.0),
+                        usdt_total=balance.usdt_total,
+                        margin_in_use=balance.margin_in_use,
+                        reserve=balance.reserve,
+                        operable=balance.operable,
                     )
                 else:
                     self.notifier.notify_critical_error(
@@ -332,30 +344,57 @@ class TradingExecutor:
         pnl_pct: float,
         duration_min: int,
         close_reason: str,
-        amount_usd: float = 0.0
+        amount_usd: float = 0.0,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
     ):
         if amount_usd > 0:
             self.release_capital(amount_usd)
 
+        # Registrar resultado en _daily_trades
+        self._daily_trades.append({
+            "symbol":    symbol,
+            "direction": direction,
+            "pnl_usd":   pnl_usd,
+            "pnl_pct":   pnl_pct,
+            "closed":    True,
+        })
+
         if self.notifications_enabled and os.getenv("NOTIFY_ON_EXIT", "true") == "true":
+            # Obtener saldo actualizado para el mensaje de cierre
+            balance = await self.check_balance()
             self.notifier.notify_trade_closed(
                 symbol=symbol, direction=direction,
                 pnl_usd=pnl_usd, pnl_pct=pnl_pct,
-                duration_min=duration_min, close_reason=close_reason
+                duration_min=duration_min, close_reason=close_reason,
+                entry_price=entry_price, exit_price=exit_price,
+                account_balance_after=balance.usdt_total if balance else 0.0,
+                usdt_total=balance.usdt_total if balance else 0.0,
+                margin_in_use=balance.margin_in_use if balance else 0.0,
+                reserve=balance.reserve if balance else 0.0,
+                operable=balance.operable if balance else 0.0,
             )
 
     async def send_daily_report(self, current_balance: float, open_positions: list = None):
         if not self.notifications_enabled:
             return
-        starting     = self._daily_starting_balance or current_balance
-        total_trades = len(self._daily_trades)
-        total_pnl    = current_balance - starting
+        starting = self._daily_starting_balance or current_balance
+        # Contar solo operaciones cerradas en este período
+        closed_trades   = [t for t in self._daily_trades if t.get("closed")]
+        total_trades    = len(closed_trades)
+        winning_trades  = len([t for t in closed_trades if t.get("pnl_usd", 0) > 0])
+        losing_trades   = len([t for t in closed_trades if t.get("pnl_usd", 0) <= 0])
+        win_rate        = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+        total_pnl       = sum(t.get("pnl_usd", 0) for t in closed_trades)
         self.notifier.notify_daily_report(
             date=datetime.now().strftime("%d/%m/%Y"),
             total_trades=total_trades,
-            winning_trades=0, losing_trades=0,
-            total_pnl=total_pnl, win_rate=0.0,
-            starting_balance=starting, ending_balance=current_balance,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            total_pnl=total_pnl,
+            win_rate=win_rate,
+            starting_balance=starting,
+            ending_balance=current_balance,
             open_positions=open_positions or []
         )
         self._daily_starting_balance = None
