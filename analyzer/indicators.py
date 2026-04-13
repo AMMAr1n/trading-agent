@@ -150,6 +150,7 @@ class TechnicalIndicators:
     ema_50: float          # Media móvil exponencial 50 períodos
     ema_200: float         # Media móvil exponencial 200 períodos (tendencia mayor)
     atr_14: float = 0.0    # Average True Range 14 períodos — volatilidad real del activo
+    candlestick_patterns: list = None  # Patrones de velas detectados por ta-lib
 
     @property
     def trend(self) -> str:
