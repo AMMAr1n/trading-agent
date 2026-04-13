@@ -222,14 +222,40 @@ class SupportResistanceDetector:
             f"{symbol} — Precio: ${current_price:,.2f} | Sin niveles detectados"
         )
 
+        # ── Fix SL=TP en pares de precio bajo ──────────────────────────────
+        # Calcular precisión dinámica según el precio del activo
+        if current_price >= 1000:
+            precision = 2   # BTC, ETH
+        elif current_price >= 1:
+            precision = 4   # SOL, BNB, XRP, ADA
+        else:
+            precision = 6   # DOGE (<$0.10)
+
+        # Garantizar distancia mínima entre SL y precio (1% mínimo)
+        MIN_SL_DISTANCE = 0.01   # 1%
+        MIN_TP_DISTANCE = 0.02   # 2%
+
+        # Long: SL debe estar al menos 1% por debajo del precio actual
+        min_sl_long = current_price * (1 - MIN_SL_DISTANCE)
+        if dynamic_sl_long > min_sl_long:
+            dynamic_sl_long = min_sl_long
+            risk_pct_long = (current_price - dynamic_sl_long) / current_price * 100
+
+        # Short: SL debe estar al menos 1% por encima del precio actual
+        min_sl_short = current_price * (1 + MIN_SL_DISTANCE)
+        if dynamic_sl_short < min_sl_short:
+            dynamic_sl_short = min_sl_short
+            risk_pct_short = (dynamic_sl_short - current_price) / current_price * 100
+        # ──────────────────────────────────────────────────────────────────
+
         return SupportResistanceResult(
             current_price=current_price,
-            supports=supports[:5],       # Top 5 soportes más cercanos
-            resistances=resistances[:5], # Top 5 resistencias más cercanas
+            supports=supports[:5],
+            resistances=resistances[:5],
             nearest_support=nearest_support,
             nearest_resistance=nearest_resistance,
-            dynamic_stop_loss_long=round(dynamic_sl_long, 2),
-            dynamic_stop_loss_short=round(dynamic_sl_short, 2),
+            dynamic_stop_loss_long=round(dynamic_sl_long, precision),
+            dynamic_stop_loss_short=round(dynamic_sl_short, precision),
             risk_pct_long=round(risk_pct_long, 2),
             risk_pct_short=round(risk_pct_short, 2)
         )

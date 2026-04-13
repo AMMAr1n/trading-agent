@@ -293,6 +293,94 @@ class SignalScorer:
 
         return 0.0
 
+    def score_candlestick_patterns(
+        self,
+        indicators: TechnicalIndicators,
+        direction: str
+    ) -> float:
+        """
+        Puntúa patrones de velas detectados — hasta 10 puntos bonus.
+        Patrones alineados con la dirección suman, contrarios restan.
+        """
+        patterns = getattr(indicators, 'candlestick_patterns', []) or []
+        if not patterns:
+            return 0.0
+
+        BULLISH_PATTERNS = {
+            "hammer_bullish": 8,
+            "engulfing_bullish": 10,
+            "morning_star_bullish": 10,
+            "marubozu_bullish": 6,
+            "doji": 3,  # neutral — indica indecisión
+        }
+        BEARISH_PATTERNS = {
+            "shooting_star_bearish": 8,
+            "engulfing_bearish": 10,
+            "evening_star_bearish": 10,
+            "marubozu_bearish": 6,
+            "doji": 3,
+        }
+
+        score = 0.0
+        for p in patterns:
+            if direction == "long" and p in BULLISH_PATTERNS:
+                score += BULLISH_PATTERNS[p]
+            elif direction == "short" and p in BEARISH_PATTERNS:
+                score += BEARISH_PATTERNS[p]
+            elif direction == "long" and p in BEARISH_PATTERNS and p != "doji":
+                score -= BEARISH_PATTERNS[p] * 0.5  # penalización parcial
+            elif direction == "short" and p in BULLISH_PATTERNS and p != "doji":
+                score -= BULLISH_PATTERNS[p] * 0.5
+
+        return max(min(score, 10.0), -10.0)  # clamp entre -10 y +10
+
+    def score_candlestick_patterns(
+        self,
+        indicators: TechnicalIndicators,
+        direction: str
+    ) -> float:
+        """
+        Puntúa patrones de velas — hasta 10 puntos bonus.
+        Funciona con el formato de ta-lib "Nombre (bias bullish/bearish)"
+        y con el formato legacy "nombre_bullish/bearish".
+        Patrones de confirmación suman, patrones contrarios restan.
+        """
+        patterns = indicators.candlestick_patterns or []
+        if not patterns:
+            return 0.0
+
+        # Patrones fuertes (mayor peso)
+        STRONG_KEYWORDS = {
+            "engulfing", "morning star", "evening star",
+            "three white soldiers", "three black crows",
+            "abandoned baby", "morning doji star", "evening doji star",
+            "marubozu", "kicking"
+        }
+
+        score = 0.0
+        for p in patterns:
+            p_lower = p.lower()
+
+            # Determinar sesgo del patrón
+            if "bullish" in p_lower:
+                bias = "bullish"
+            elif "bearish" in p_lower:
+                bias = "bearish"
+            else:
+                continue  # neutral — no suma ni resta
+
+            # Determinar si es fuerte o débil
+            is_strong = any(kw in p_lower for kw in STRONG_KEYWORDS)
+            pts_confirm = 10.0 if is_strong else 5.0
+            pts_contra   = -8.0 if is_strong else -4.0
+
+            if direction == "long":
+                score += pts_confirm if bias == "bullish" else pts_contra
+            elif direction == "short":
+                score += pts_confirm if bias == "bearish" else pts_contra
+
+        return max(min(score, 15.0), -10.0)
+
     def calculate(
         self,
         indicators: TechnicalIndicators,
@@ -327,7 +415,8 @@ class SignalScorer:
         rsi_pts = self.score_rsi(indicators, direction)
         bb_pts = self.score_bollinger(indicators, direction)
 
-        base_score = ema_pts + vol_pts + macd_pts + rsi_pts + bb_pts
+        candle_pts = self.score_candlestick_patterns(indicators, direction)
+        base_score = ema_pts + vol_pts + macd_pts + rsi_pts + bb_pts + candle_pts
         context_bonus = min(context_bonus, 10.0)
         total_score = min(base_score + context_bonus, 100.0)
 
@@ -362,14 +451,16 @@ class SignalScorer:
             reasoning=reasoning
         )
 
+        patterns_str = ",".join(getattr(indicators, 'candlestick_patterns', []) or [])
         logger.info(
             f"{indicators.symbol}/{indicators.timeframe} — "
             f"Score: {total_score:.0f}/100 | "
             f"Direction: {direction} | "
             f"EMA: {ema_pts:.0f} | Vol: {vol_pts:.0f} | "
             f"MACD: {macd_pts:.0f} | RSI: {rsi_pts:.0f} | "
-            f"BB: {bb_pts:.0f} | "
-            f"Tradeable: {score.is_tradeable}"
+            f"BB: {bb_pts:.0f} | Candle: {candle_pts:.0f}"
+            + (f" | Patrones: {patterns_str}" if patterns_str else "") +
+            f" | Tradeable: {score.is_tradeable}"
         )
 
         return score

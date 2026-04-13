@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 PRIMARY_TIMEFRAME = "1h"
 CONFIRMATION_TIMEFRAME = "2h"  # Confirma la tendencia intermedia
 DAILY_TIMEFRAME = "1d"         # Tendencia mayor — filtro direccional
+WEEKLY_TIMEFRAME = "1w"        # Tendencia macro — visión de largo plazo
 
 # Score mínimo para considerar una señal válida
 MIN_SCORE = int(os.getenv("MIN_SCORE", "65"))
@@ -48,6 +49,7 @@ class TradingSignal:
     indicators_1h: TechnicalIndicators
     indicators_4h: Optional[TechnicalIndicators]
     indicators_1d: Optional[TechnicalIndicators]
+    indicators_1w: Optional[TechnicalIndicators] = None
     levels: SupportResistanceResult
 
     @property
@@ -200,6 +202,7 @@ class TechnicalAnalyzer:
         candles_1h = candles_by_tf[PRIMARY_TIMEFRAME]
         candles_2h = candles_by_tf.get(CONFIRMATION_TIMEFRAME, [])
         candles_1d = candles_by_tf.get(DAILY_TIMEFRAME, [])
+        candles_1w = candles_by_tf.get(WEEKLY_TIMEFRAME, [])
 
         # Calcular indicadores en timeframe principal
         indicators_1h = self.indicator_calc.calculate(symbol, PRIMARY_TIMEFRAME, candles_1h)
@@ -215,6 +218,11 @@ class TechnicalAnalyzer:
         indicators_1d = None
         if candles_1d and len(candles_1d) >= 50:
             indicators_1d = self.indicator_calc.calculate(symbol, DAILY_TIMEFRAME, candles_1d)
+
+        # Calcular indicadores semanales — tendencia macro
+        indicators_1w = None
+        if candles_1w and len(candles_1w) >= 20:
+            indicators_1w = self.indicator_calc.calculate(symbol, WEEKLY_TIMEFRAME, candles_1w)
 
         # Detectar soportes y resistencias
         levels = self.level_detector.detect(symbol, candles_1h)
@@ -279,6 +287,26 @@ class TechnicalAnalyzer:
                 logger.info(f"{symbol} — Bonus por alineación diaria: score → {score.total:.0f}")
         # ──────────────────────────────────────────────────────────────────
 
+        # ── Modificador 1W — tendencia macro ─────────────────────────────
+        if indicators_1w:
+            direction_1w = indicators_1w.suggested_direction
+            trend_1w     = indicators_1w.trend
+            if direction_1w != "neutral" and direction_1w != direction:
+                weekly_penalty = 15.0 if "strong" in trend_1w else 10.0
+                score_1w = score.total - weekly_penalty
+                if score_1w < MIN_SCORE:
+                    logger.info(
+                        f"{symbol} — Score ajustado por tendencia semanal ({trend_1w}): "
+                        f"{score.total:.0f} - {weekly_penalty:.0f} = {score_1w:.0f} — descartada"
+                    )
+                    return None
+                score.total = round(score_1w, 1)
+                logger.info(f"{symbol} — Penalización semanal: score → {score.total:.0f}")
+            elif direction_1w == direction:
+                score.total = min(round(score.total + 8, 1), 100.0)
+                logger.info(f"{symbol} — Bonus alineación semanal: score → {score.total:.0f}")
+        # ──────────────────────────────────────────────────────────────────
+
         # Confirmación con timeframe 2h
         if indicators_4h:
             direction_4h = indicators_4h.suggested_direction
@@ -306,6 +334,7 @@ class TechnicalAnalyzer:
             indicators_1h=indicators_1h,
             indicators_4h=indicators_4h,
             indicators_1d=indicators_1d,
+            indicators_1w=indicators_1w,
             levels=levels,
         )
 

@@ -130,6 +130,19 @@ EMA 20/50/200:    ${ind1d.ema_20:,.2f} / ${ind1d.ema_50:,.2f} / ${ind1d.ema_200:
 Dirección diaria: {ind1d.suggested_direction}
 Alineación 1h/1d: {'✅ ALINEADOS' if ind1d.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN MAYOR'}"""
 
+        # Contexto semanal — tendencia macro
+        weekly_context = ""
+        if hasattr(signal, 'indicators_1w') and signal.indicators_1w:
+            ind1w = signal.indicators_1w
+            weekly_context = f"""
+=== TENDENCIA SEMANAL (1W) — MACRO ===
+Tendencia semanal: {ind1w.trend}
+RSI semanal:       {ind1w.rsi.value:.1f} ({ind1w.rsi.signal})
+MACD semanal:      {ind1w.macd.signal}
+EMA 20/50/200:     ${ind1w.ema_20:,.2f} / ${ind1w.ema_50:,.2f} / ${ind1w.ema_200:,.2f}
+Dirección semanal: {ind1w.suggested_direction}
+Alineación 1h/1w:  {'✅ ALINEADOS — tendencia macro favorable' if ind1w.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN MACRO — operar con extrema cautela'}"""
+
         search_hint = signal.symbol.replace("USDT", "")
         prompt = f"""=== SEÑAL DE TRADING DETECTADA ===
 
@@ -147,7 +160,11 @@ Bollinger Bands:    {ind.bollinger.signal} — precio al {ind.bollinger.percent_
 Volumen:            {ind.volume.ratio:.2f}x el promedio ({ind.volume.signal})
 EMA 20/50/200:      ${ind.ema_20:,.2f} / ${ind.ema_50:,.2f} / ${ind.ema_200:,.2f}
 Tendencia general:  {ind.trend}
-{confirmation_4h}{daily_context}
+Patrones de velas:  {', '.join(getattr(ind, 'candlestick_patterns', []) or []) or 'ninguno detectado'}
+{confirmation_4h}{daily_context}{weekly_context}
+
+=== PATRONES DE VELAS (últimas 3 velas 1h) ===
+{self._format_candlestick_patterns(signal.indicators_1h)}
 
 === NIVELES DE PRECIO ===
 Soporte más cercano:      {nearest_support} ({support_dist})
@@ -203,6 +220,23 @@ Analiza:
 Responde solo con el JSON."""
 
         return prompt
+
+    def _format_candlestick_patterns(self, indicators) -> str:
+        patterns = getattr(indicators, 'candlestick_patterns', None) or []
+        if not patterns:
+            return "Sin patrones significativos detectados"
+        # Los patrones ya vienen con descripción del bias — ej: "Hammer (bullish)"
+        # Solo formateamos con bullet y emoji de dirección
+        lines = []
+        for p in patterns:
+            p_lower = p.lower()
+            if "bullish" in p_lower:
+                lines.append(f"📈 {p}")
+            elif "bearish" in p_lower:
+                lines.append(f"📉 {p}")
+            else:
+                lines.append(f"⚪ {p}")
+        return "\n".join(lines)
 
     def _format_rss_headlines(self, headlines: list, symbol: str) -> str:
         if not headlines:

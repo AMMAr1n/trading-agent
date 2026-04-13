@@ -14,6 +14,13 @@ import numpy as np
 import pandas as pd
 import ta
 
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    TALIB_AVAILABLE = False
+
+
 from collector.models import CandleData
 
 logger = logging.getLogger(__name__)
@@ -419,6 +426,132 @@ class TechnicalIndicatorCalculator:
             logger.error(f"Error calculando ATR: {e}")
             return 0.0
 
+    def detect_candlestick_patterns(self, df: pd.DataFrame) -> list[str]:
+        """
+        Detecta patrones de velas usando TA-Lib (+50 patrones) si está disponible,
+        con fallback a detección manual con numpy si no lo está.
+        """
+        patterns = []
+
+        if TALIB_AVAILABLE:
+            try:
+                import numpy as np
+                o = df["open"].values.astype(float)
+                h = df["high"].values.astype(float)
+                l = df["low"].values.astype(float)
+                c = df["close"].values.astype(float)
+
+                # Diccionario: función talib → nombre legible → tipo (bullish/bearish/neutral)
+                TALIB_PATTERNS = {
+                    "CDL2CROWS":         ("Two Crows",             "bearish"),
+                    "CDL3BLACKCROWS":    ("Three Black Crows",     "bearish"),
+                    "CDL3INSIDE":        ("Three Inside Up/Down",  "neutral"),
+                    "CDL3LINESTRIKE":    ("Three-Line Strike",     "neutral"),
+                    "CDL3OUTSIDE":       ("Three Outside Up/Down", "neutral"),
+                    "CDL3WHITESOLDIERS": ("Three White Soldiers",  "bullish"),
+                    "CDLABANDONEDBABY":  ("Abandoned Baby",        "neutral"),
+                    "CDLADVANCEBLOCK":   ("Advance Block",         "bearish"),
+                    "CDLDOJI":           ("Doji",                  "neutral"),
+                    "CDLDOJISTAR":       ("Doji Star",             "neutral"),
+                    "CDLDRAGONFLYDOJI":  ("Dragonfly Doji",        "bullish"),
+                    "CDLENGULFING":      ("Engulfing",             "neutral"),
+                    "CDLEVENINGDOJISTAR":("Evening Doji Star",     "bearish"),
+                    "CDLEVENINGSTAR":    ("Evening Star",          "bearish"),
+                    "CDLGRAVESTONEDOJI": ("Gravestone Doji",       "bearish"),
+                    "CDLHAMMER":         ("Hammer",                "bullish"),
+                    "CDLHANGINGMAN":     ("Hanging Man",           "bearish"),
+                    "CDLHARAMI":         ("Harami",                "neutral"),
+                    "CDLHARAMICROSS":    ("Harami Cross",          "neutral"),
+                    "CDLHIGHWAVE":       ("High-Wave Candle",      "neutral"),
+                    "CDLHIKKAKE":        ("Hikkake Pattern",       "neutral"),
+                    "CDLINVERTEDHAMMER": ("Inverted Hammer",       "bullish"),
+                    "CDLKICKING":        ("Kicking",               "neutral"),
+                    "CDLLONGLEGGEDDOJI": ("Long Legged Doji",      "neutral"),
+                    "CDLLONGLINE":       ("Long Line Candle",      "neutral"),
+                    "CDLMARUBOZU":       ("Marubozu",              "neutral"),
+                    "CDLMATCHINGLOW":    ("Matching Low",          "bullish"),
+                    "CDLMORNINGDOJISTAR":("Morning Doji Star",     "bullish"),
+                    "CDLMORNINGSTAR":    ("Morning Star",          "bullish"),
+                    "CDLONNECK":         ("On-Neck Pattern",       "bearish"),
+                    "CDLPIERCING":       ("Piercing Pattern",      "bullish"),
+                    "CDLRICKSHAWMAN":    ("Rickshaw Man",          "neutral"),
+                    "CDLRISEFALL3METHODS":("Rise/Fall Three Methods","neutral"),
+                    "CDLSEPARATINGLINES":("Separating Lines",      "neutral"),
+                    "CDLSHOOTINGSTAR":   ("Shooting Star",         "bearish"),
+                    "CDLSHORTLINE":      ("Short Line Candle",     "neutral"),
+                    "CDLSPINNINGTOP":    ("Spinning Top",          "neutral"),
+                    "CDLSTALLEDPATTERN": ("Stalled Pattern",       "bearish"),
+                    "CDLSTICKSANDWICH":  ("Stick Sandwich",        "bullish"),
+                    "CDLTAKURI":         ("Takuri",                "bullish"),
+                    "CDLTASUKIGAP":      ("Tasuki Gap",            "neutral"),
+                    "CDLTHRUSTING":      ("Thrusting Pattern",     "bearish"),
+                    "CDLTRISTAR":        ("Tristar Pattern",       "neutral"),
+                    "CDLUNIQUE3RIVER":   ("Unique 3 River",        "bullish"),
+                    "CDLUPSIDEGAP2CROWS":("Upside Gap Two Crows",  "bearish"),
+                    "CDLXSIDEGAP3METHODS":("Upside/Downside Gap Three Methods","neutral"),
+                }
+
+                for func_name, (label, bias) in TALIB_PATTERNS.items():
+                    try:
+                        func = getattr(talib, func_name)
+                        result = func(o, h, l, c)
+                        val = int(result[-1])
+                        if val > 0:
+                            patterns.append(f"{label} ({bias} bullish)")
+                        elif val < 0:
+                            patterns.append(f"{label} ({bias} bearish)")
+                    except Exception:
+                        continue
+
+                logger.debug(f"TA-Lib detectó {len(patterns)} patrones de velas")
+                return patterns[:8]  # máximo 8 patrones para no saturar el prompt
+
+            except Exception as e:
+                logger.warning(f"Error en ta-lib patterns: {e} — usando fallback")
+
+        # ── Fallback: detección manual con numpy ──────────────────────────
+        if len(df) < 3:
+            return patterns
+
+        c = df["close"].iloc[-1]
+        o = df["open"].iloc[-1]
+        h = df["high"].iloc[-1]
+        l = df["low"].iloc[-1]
+        c1 = df["close"].iloc[-2]
+        o1 = df["open"].iloc[-2]
+        c2 = df["close"].iloc[-3]
+
+        body = abs(c - o)
+        body1 = abs(c1 - o1)
+        range_ = h - l
+        upper_shadow = h - max(c, o)
+        lower_shadow = min(c, o) - l
+
+        if range_ > 0 and body / range_ < 0.1:
+            patterns.append("Doji (neutral)")
+        if range_ > 0 and body / range_ < 0.35 and lower_shadow >= body * 2 and upper_shadow <= body * 0.5 and c > o:
+            patterns.append("Hammer (bullish)")
+        if range_ > 0 and body / range_ < 0.35 and upper_shadow >= body * 2 and lower_shadow <= body * 0.5 and c < o:
+            patterns.append("Shooting Star (bearish)")
+        if c > o and range_ > 0 and body / range_ > 0.9:
+            patterns.append("Marubozu alcista (bullish)")
+        if c < o and range_ > 0 and body / range_ > 0.9:
+            patterns.append("Marubozu bajista (bearish)")
+        if c > o and c1 < o1 and c > o1 and o < c1 and body > body1 * 1.2:
+            patterns.append("Engulfing alcista (bullish)")
+        if c < o and c1 > o1 and c < o1 and o > c1 and body > body1 * 1.2:
+            patterns.append("Engulfing bajista (bearish)")
+        if (c2 < df["open"].iloc[-3]
+                and body1 / (df["high"].iloc[-2] - df["low"].iloc[-2] + 0.0001) < 0.3
+                and c > o and c > (df["close"].iloc[-3] + df["open"].iloc[-3]) / 2):
+            patterns.append("Morning Star (bullish)")
+        if (c2 > df["open"].iloc[-3]
+                and body1 / (df["high"].iloc[-2] - df["low"].iloc[-2] + 0.0001) < 0.3
+                and c < o and c < (df["close"].iloc[-3] + df["open"].iloc[-3]) / 2):
+            patterns.append("Evening Star (bearish)")
+
+        return patterns
+
     def calculate(
         self,
         symbol: str,
@@ -448,6 +581,7 @@ class TechnicalIndicatorCalculator:
             volume = self.calculate_volume(df)
             ema_20, ema_50, ema_200 = self.calculate_emas(df)
             atr_14 = self.calculate_atr(df)
+            candlestick_patterns = self.detect_candlestick_patterns(df)
 
             if not all([rsi, macd, bollinger, volume]):
                 logger.warning(f"Indicadores incompletos para {symbol}/{timeframe}")
@@ -465,6 +599,7 @@ class TechnicalIndicatorCalculator:
                 ema_50=ema_50,
                 ema_200=ema_200,
                 atr_14=atr_14,
+                candlestick_patterns=candlestick_patterns,
             )
 
             logger.debug(
