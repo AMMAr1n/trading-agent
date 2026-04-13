@@ -63,12 +63,24 @@ class TelegramNotifier:
     def notify_no_funds(
         self, usdt_free: float, min_required: float,
         usdt_total: float = 0.0, margin_in_use: float = 0.0,
-        reserve: float = 0.0, operable: float = 0.0
+        reserve: float = 0.0, operable: float = 0.0,
+        symbol: str = "", direction: str = "", score: float = 0.0
     ) -> bool:
         total = usdt_total if usdt_total > 0 else usdt_free
+        arrow = "📈" if direction == "long" else "📉" if direction == "short" else ""
+        direction_str = "LONG (SUBE)" if direction == "long" else "SHORT (BAJA)" if direction == "short" else ""
+        signal_line = ""
+        if symbol:
+            signal_line = f"{arrow} Señal: <b>{symbol}</b>"
+            if direction_str:
+                signal_line += f" — {direction_str}"
+            if score > 0:
+                signal_line += f" | Score: <b>{score:.0f}/100</b>"
+            signal_line += "\n"
         return self.send(
             f"🔴 <b>SIN SALDO DISPONIBLE</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
+            f"{signal_line}"
             f"💰 Saldo total: <b>${total:.2f} USDT</b>\n"
             f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>\n"
             f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>\n"

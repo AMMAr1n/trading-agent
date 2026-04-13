@@ -95,8 +95,10 @@ class BalanceChecker:
 
             reserve  = usdt_total * self.reserve_pct
 
-            # Capital operable = libre - reserva - margen ya en uso
-            operable = max(usdt_free - reserve - margin_in_use, 0)
+            # Capital operable = saldo libre - reserva
+            # NOTA: usdt_free ya viene de Binance descontando el margen en uso,
+            # por eso NO restamos margin_in_use aquí (evitamos doble descuento)
+            operable = max(usdt_free - reserve, 0)
 
             vobo_threshold       = operable * self.vobo_min_pct
             min_trade_pct_amount = operable * self.min_trade_pct
