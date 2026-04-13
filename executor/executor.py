@@ -186,16 +186,15 @@ class TradingExecutor:
         # ── Sin fondos suficientes — notificar con símbolo ──────────────
         if not balance.has_sufficient_funds:
             if self.notifications_enabled:
-                self.notifier.notify_no_funds(
-                    usdt_free=balance.usdt_free,
-                    min_required=balance.min_trade_amount,
+                self.notifier.notify_skipped(
+                    symbol=decision.symbol,
+                    direction=decision.direction,
+                    score=getattr(decision, "score", 0.0),
+                    reason=f"Saldo operable ${balance.operable:.2f} < mínimo ${balance.min_trade_amount:.2f} USDT",
                     usdt_total=balance.usdt_total,
                     margin_in_use=balance.margin_in_use,
                     reserve=balance.reserve,
                     operable=balance.operable,
-                    symbol=decision.symbol,
-                    direction=decision.direction,
-                    score=getattr(decision, "score", 0.0),
                 )
             return None
 
@@ -295,11 +294,16 @@ class TradingExecutor:
                         min_req = float(error_msg.split("$")[2].split(")")[0])
                     except Exception:
                         min_req = 0.0
-                    self.notifier.notify_insufficient_amount(
+                    self.notifier.notify_skipped(
                         symbol=decision.symbol,
-                        amount_usd=decision.amount_usd,
-                        min_required=min_req,
+                        direction=decision.direction,
                         score=getattr(decision, "score", 0.0),
+                        reason=f"Mínimo de Binance ${min_req:.2f} > saldo operable ${balance.operable:.2f} USDT",
+                        min_required=min_req,
+                        usdt_total=balance.usdt_total,
+                        margin_in_use=balance.margin_in_use,
+                        reserve=balance.reserve,
+                        operable=balance.operable,
                     )
                 else:
                     self.notifier.notify_critical_error(

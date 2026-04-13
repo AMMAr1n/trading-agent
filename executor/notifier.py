@@ -418,6 +418,41 @@ class TelegramNotifier:
             f"¡Hasta el próximo reporte! 🚀"
         )
 
+    def notify_skipped(
+        self,
+        symbol: str,
+        direction: str = "",
+        score: float = 0.0,
+        reason: str = "",
+        min_required: float = 0.0,
+        usdt_total: float = 0.0,
+        margin_in_use: float = 0.0,
+        reserve: float = 0.0,
+        operable: float = 0.0,
+    ) -> bool:
+        arrow = "📈" if direction == "long" else "📉" if direction == "short" else "⚪"
+        direction_str = "LONG (SUBE)" if direction == "long" else "SHORT (BAJA)" if direction == "short" else ""
+        signal_parts = [f"<b>{symbol}</b>"]
+        if direction_str:
+            signal_parts.append(direction_str)
+        if score > 0:
+            signal_parts.append(f"Score: <b>{score:.0f}/100</b>")
+        signal_line = f"{arrow} Señal: {' — '.join(signal_parts[:2])}"
+        if score > 0:
+            signal_line += f" | Score: <b>{score:.0f}/100</b>"
+        reason_line = f"Motivo: {reason}" if reason else ""
+        return self.send(
+            f"⚠️ <b>OPERACIÓN SALTADA — {symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{signal_line}\n"
+            f"{reason_line}\n"
+            f"\n"
+            f"💰 Saldo total: <b>${usdt_total:.2f} USDT</b>\n"
+            f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>\n"
+            f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>\n"
+            f"✅ Saldo operable: <b>${operable:.2f} USDT</b>\n"
+        )
+
     def notify_agent_started(
         self, balance: float, operable: float = 0.0,
         margin_in_use: float = 0.0, reserve: float = 0.0
