@@ -104,14 +104,10 @@ class TelegramNotifier:
         # Desglose de capital
         total = usdt_total if usdt_total > 0 else account_balance
         capital_section = (
-            f"💰 Saldo total: <b>${total:.2f} USDT</b>
-"
-            f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>
-"
-            f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>
-"
-            f"✅ Saldo operable: <b>${operable:.2f} USDT</b>
-"
+            f"💰 Saldo total: <b>${total:.2f} USDT</b>\n"
+            f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>\n"
+            f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>\n"
+            f"✅ Saldo operable: <b>${operable:.2f} USDT</b>\n"
             f"📌 Esta operación: <b>${monto:.2f} USDT</b>"
         )
 
@@ -127,42 +123,27 @@ class TelegramNotifier:
             ganancia_usd = monto * (ganancia_pct / 100)
             rr_ratio     = ganancia_pct / riesgo_pct if riesgo_pct > 0 else 0
             pnl_lines = (
-                f"
-"
-                f"📊 <b>P&L ESTIMADO</b>
-"
-                f"✅ Si TP (${take_profit:,.4f}): <b>+${ganancia_usd:.2f} USD (+{ganancia_pct:.1f}%)</b>
-"
-                f"❌ Si SL (${stop_loss:,.4f}): <b>-${riesgo_usd:.2f} USD (-{riesgo_pct:.1f}%)</b>
-"
+                f"\n"
+                f"📊 <b>P&L ESTIMADO</b>\n"
+                f"✅ Si TP (${take_profit:,.4f}): <b>+${ganancia_usd:.2f} USD (+{ganancia_pct:.1f}%)</b>\n"
+                f"❌ Si SL (${stop_loss:,.4f}): <b>-${riesgo_usd:.2f} USD (-{riesgo_pct:.1f}%)</b>\n"
                 f"Ratio R/R: <b>1:{rr_ratio:.1f}</b>"
             )
         else:
             pnl_lines = ""
 
         msg1 = (
-            f"{arrow} <b>OPERACIÓN ABIERTA</b>
-"
-            f"━━━━━━━━━━━━━━━━━━
-"
-            f"Activo: <b>{symbol}</b> — {direction_str}
-"
-            f"Precio de entrada: <b>${precio_entrada:,.4f}</b>
-"
-            f"Apalancamiento: <b>{leverage}</b>
-"
-            f"
-"
-            f"💰 <b>CAPITAL</b>
-"
-            f"{capital_section}
-"
-            f"
-"
-            f"🎯 <b>NIVELES</b>
-"
-            f"Stop-loss: <b>${stop_loss:,.4f}</b>
-"
+            f"{arrow} <b>OPERACIÓN ABIERTA</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Activo: <b>{symbol}</b> — {direction_str}\n"
+            f"Precio de entrada: <b>${precio_entrada:,.4f}</b>\n"
+            f"Apalancamiento: <b>{leverage}</b>\n"
+            f"\n"
+            f"💰 <b>CAPITAL</b>\n"
+            f"{capital_section}\n"
+            f"\n"
+            f"🎯 <b>NIVELES</b>\n"
+            f"Stop-loss: <b>${stop_loss:,.4f}</b>\n"
             f"Take-profit: <b>${take_profit:,.4f}</b>"
             f"{pnl_lines}"
         )
@@ -243,38 +224,27 @@ class TelegramNotifier:
 
         price_lines = ""
         if entry_price > 0 and exit_price > 0:
-            price_lines = f"Entrada: <b>${entry_price:,.4f}</b>  →  Salida: <b>${exit_price:,.4f}</b>
-"
+            price_lines = f"Entrada: <b>${entry_price:,.4f}</b>  →  Salida: <b>${exit_price:,.4f}</b>\n"
 
         # Desglose post-cierre
         total = usdt_total if usdt_total > 0 else account_balance_after
         balance_section = ""
         if total > 0:
             balance_section = (
-                f"
-💰 <b>SALDO POST-CIERRE</b>
-"
-                f"💰 Saldo total: <b>${total:.2f} USDT</b>
-"
-                f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>
-"
-                f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>
-"
+                f"\n💰 <b>SALDO POST-CIERRE</b>\n"
+                f"💰 Saldo total: <b>${total:.2f} USDT</b>\n"
+                f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>\n"
+                f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>\n"
                 f"✅ Saldo operable: <b>${operable:.2f} USDT</b>"
             )
 
         return self.send(
-            f"{emoji} <b>OPERACIÓN CERRADA — {result}</b>
-"
-            f"━━━━━━━━━━━━━━━━━━
-"
-            f"Activo: <b>{symbol}</b> ({direction.upper()})
-"
+            f"{emoji} <b>OPERACIÓN CERRADA — {result}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Activo: <b>{symbol}</b> ({direction.upper()})\n"
             f"{price_lines}"
-            f"Resultado: <b>{sign}${pnl_usd:.2f} USD ({sign}{pnl_pct:.1f}%)</b>
-"
-            f"Duración: {duration_min} min
-"
+            f"Resultado: <b>{sign}${pnl_usd:.2f} USD ({sign}{pnl_pct:.1f}%)</b>\n"
+            f"Duración: {duration_min} min\n"
             f"Motivo: {close_reason}"
             f"{balance_section}"
         )
@@ -307,27 +277,19 @@ class TelegramNotifier:
         usdt_total: float = 0.0, margin_in_use: float = 0.0,
         reserve: float = 0.0, operable: float = 0.0
     ) -> bool:
-        score_line = f"Score de la señal: <b>{score:.0f}/100</b>
-" if score > 0 else ""
+        score_line = f"Score de la señal: <b>{score:.0f}/100</b>\n" if score > 0 else ""
         balance_section = ""
         if usdt_total > 0:
             balance_section = (
-                f"
-💰 Saldo total: <b>${usdt_total:.2f} USDT</b>
-"
-                f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>
-"
-                f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>
-"
-                f"✅ Saldo operable: <b>${operable:.2f} USDT</b>
-"
+                f"\n💰 Saldo total: <b>${usdt_total:.2f} USDT</b>\n"
+                f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>\n"
+                f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>\n"
+                f"✅ Saldo operable: <b>${operable:.2f} USDT</b>\n"
             )
         return self.send(
-            f"⚠️ <b>MONTO INSUFICIENTE — {symbol}</b>
-"
+            f"⚠️ <b>MONTO INSUFICIENTE — {symbol}</b>\n"
             f"{score_line}"
-            f"Monto calculado: <b>${amount_usd:.2f} USDT</b>
-"
+            f"Monto calculado: <b>${amount_usd:.2f} USDT</b>\n"
             f"Mínimo requerido por Binance: <b>${min_required:.2f} USDT</b>"
             f"{balance_section}"
             f"El agente saltó este par."
