@@ -49,8 +49,8 @@ class TradingSignal:
     indicators_1h: TechnicalIndicators
     indicators_4h: Optional[TechnicalIndicators]
     indicators_1d: Optional[TechnicalIndicators]
-    indicators_1w: Optional[TechnicalIndicators] = None
     levels: SupportResistanceResult
+    indicators_1w: Optional[TechnicalIndicators] = None
 
     @property
     def is_autonomous(self) -> bool:
