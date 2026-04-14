@@ -133,14 +133,17 @@ class PositionMonitor:
 
         if trade_id:
             try:
-                self.db.close_trade(
-                    trade_id=trade_id,
-                    exit_price=0,    # el monitor no sabe el precio exacto de cierre
-                    pnl_usd=0,
-                    pnl_pct=0,
-                    close_reason="cerrada_por_binance"
-                )
-                logger.info(f"PositionMonitor: trade ID {trade_id} cerrado en DB")
+                # Solo cerrar en DB si no fue ya actualizado por _notify_closed
+                from database.database import TradingDatabase
+                trades = self.db.get_open_trades()
+                still_open = any(t["id"] == trade_id for t in trades)
+                if still_open:
+                    self.db.close_trade(
+                        trade_id=trade_id,
+                        exit_price=0, pnl_usd=0, pnl_pct=0,
+                        close_reason="cerrada_por_binance"
+                    )
+                    logger.info(f"PositionMonitor: trade ID {trade_id} cerrado en DB")
             except Exception as e:
                 logger.error(f"PositionMonitor: error cerrando trade en DB: {e}")
 
@@ -229,28 +232,74 @@ class PositionMonitor:
         if not self.notifier and not self.trading_executor:
             return
         try:
-            ticker      = await self.exchange.fetch_ticker(symbol)
-            exit_price  = float(ticker["last"])
-            entry       = meta["entry_price"]
-            direction   = meta["direction"]
-            pnl         = (exit_price - entry) if direction == "long" else (entry - exit_price)
-            pnl        *= meta["quantity"]
-            pnl_pct     = ((exit_price - entry) / entry * 100) if direction == "long" \
-                          else ((entry - exit_price) / entry * 100)
-            dur_min     = int((datetime.now(timezone.utc) - meta["opened_at"]).total_seconds() / 60)
+            entry     = meta["entry_price"]
+            direction = meta["direction"]
+            quantity  = meta["quantity"]
+
+            # Obtener precio real de cierre desde historial de Binance
+            exit_price  = 0.0
+            close_reason = "SL/TP ejecutado por Binance"
+            try:
+                raw_sym = symbol.replace("USDT", "/USDT:USDT")
+                trades_history = await self.exchange.fetch_my_trades(raw_sym, limit=5)
+                if trades_history:
+                    last = trades_history[-1]
+                    exit_price = float(last.get("price", 0) or 0)
+                    # Determinar si fue TP o SL comparando con niveles
+                    sl = meta.get("stop_loss", 0)
+                    tp = meta.get("take_profit", 0)
+                    if exit_price > 0 and sl > 0 and tp > 0:
+                        if direction == "long":
+                            close_reason = "take_profit" if exit_price >= tp * 0.995 else "stop_loss"
+                        else:
+                            close_reason = "take_profit" if exit_price <= tp * 1.005 else "stop_loss"
+            except Exception as e:
+                logger.warning(f"PositionMonitor: no se pudo obtener precio de cierre real para {symbol}: {e}")
+
+            # Fallback al precio actual si no se obtuvo el real
+            if exit_price == 0:
+                try:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    exit_price = float(ticker["last"])
+                except Exception:
+                    exit_price = entry  # último recurso
+
+            # Calcular P&L con precio real
+            diff    = (exit_price - entry) if direction == "long" else (entry - exit_price)
+            pnl     = round(diff * quantity, 2)
+            pnl_pct = round((diff / entry) * 100, 2) if entry > 0 else 0.0
+            dur_min = int((datetime.now(timezone.utc) - meta["opened_at"]).total_seconds() / 60)
+
+            # Actualizar DB con precio real y P&L
+            if self.db:
+                trade_id = meta.get("trade_id")
+                if trade_id:
+                    try:
+                        self.db.close_trade(
+                            trade_id=trade_id,
+                            exit_price=exit_price,
+                            pnl_usd=pnl,
+                            pnl_pct=pnl_pct,
+                            close_reason=close_reason,
+                        )
+                    except Exception as e:
+                        logger.error(f"PositionMonitor: error actualizando DB con P&L real: {e}")
+
+            logger.info(f"PositionMonitor: {symbol} cerrada | Precio: ${exit_price:.4f} | P&L: ${pnl:.2f} | Razón: {close_reason}")
+
             if self.trading_executor:
                 await self.trading_executor.notify_trade_closed(
                     symbol=symbol, direction=direction,
-                    pnl_usd=round(pnl, 2), pnl_pct=round(pnl_pct, 2),
-                    duration_min=dur_min, close_reason="SL/TP ejecutado por Binance",
+                    pnl_usd=pnl, pnl_pct=pnl_pct,
+                    duration_min=dur_min, close_reason=close_reason,
                     amount_usd=meta.get("amount_usd", 0),
                     entry_price=entry, exit_price=exit_price,
                 )
             elif self.notifier:
                 self.notifier.notify_trade_closed(
                     symbol=symbol, direction=direction,
-                    pnl_usd=round(pnl, 2), pnl_pct=round(pnl_pct, 2),
-                    duration_min=dur_min, close_reason="SL/TP ejecutado por Binance",
+                    pnl_usd=pnl, pnl_pct=pnl_pct,
+                    duration_min=dur_min, close_reason=close_reason,
                     entry_price=entry, exit_price=exit_price,
                 )
         except Exception as e:
