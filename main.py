@@ -260,6 +260,11 @@ class TradingAgent:
                 hour_opened=datetime.now(timezone.utc).hour,
                 fear_greed=snapshot.market_context.fear_greed_index,
                 score_breakdown=score_breakdown,
+                balance_total=balance.usdt_total,
+                balance_reserve=balance.reserve,
+                balance_operable=balance.operable,
+                sl_tp_method="algo_api",
+                version="v0.6.0",
             ))
             logger.info(f"Operación registrada en DB: ID {trade_id}")
 

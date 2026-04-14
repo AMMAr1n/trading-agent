@@ -47,7 +47,7 @@ class TradeRecord:
     pnl_usd: Optional[float]
     pnl_pct: Optional[float]
     close_reason: Optional[str] # "take_profit" | "stop_loss" | "manual" | "timeout"
-    order_id: Optional[str]     # ID de la orden en Binance
+    order_id: Optional[str]     # ID de la orden en Binance (trazabilidad)
     volume_ratio: float = 0.0
     trend_1h: Optional[str] = None
     trend_1d: Optional[str] = None
@@ -56,6 +56,12 @@ class TradeRecord:
     hour_opened: int = 0
     fear_greed: int = 50
     score_breakdown: Optional[str] = None
+    balance_total: float = 0.0
+    balance_reserve: float = 0.0
+    balance_operable: float = 0.0
+    duration_min: int = 0
+    sl_tp_method: str = "algo_api"
+    version: str = "v0.6.0"
 
 
 @dataclass
@@ -144,11 +150,39 @@ class TradingDatabase:
                     patterns TEXT,
                     hour_opened INTEGER DEFAULT 0,
                     fear_greed INTEGER DEFAULT 50,
-                    score_breakdown TEXT
+                    score_breakdown TEXT,
+                    balance_total REAL DEFAULT 0,
+                    balance_reserve REAL DEFAULT 0,
+                    balance_operable REAL DEFAULT 0,
+                    duration_min INTEGER DEFAULT 0,
+                    sl_tp_method TEXT DEFAULT 'algo_api',
+                    version TEXT DEFAULT 'v0.6.0'
                 )
             """)
 
-            # Migración: agregar columnas de contexto si no existen (para BD existentes)
+            # Tabla de versiones del agente
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    implemented_at TEXT NOT NULL,
+                    notes TEXT
+                )
+            """)
+
+            # Insertar versión actual si no existe
+            cursor.execute("""
+                INSERT OR IGNORE INTO versions (version, description, implemented_at, notes)
+                VALUES (
+                    'v0.6.0',
+                    'ta-lib patrones velas, timeframe 1W, fix SL/TP precio bajo, MIN_SCORE=45, pipeline aprendizaje BD, notificaciones mejoradas',
+                    '2026-04-13',
+                    'Primera versión con aprendizaje desde BD y contexto multi-timeframe completo'
+                )
+            """)
+
+            # Migración: agregar columnas si no existen (para BD existentes)
             for col, col_type in [
                 ("volume_ratio", "REAL DEFAULT 0"),
                 ("trend_1h", "TEXT"),
@@ -158,6 +192,12 @@ class TradingDatabase:
                 ("hour_opened", "INTEGER DEFAULT 0"),
                 ("fear_greed", "INTEGER DEFAULT 50"),
                 ("score_breakdown", "TEXT"),
+                ("balance_total", "REAL DEFAULT 0"),
+                ("balance_reserve", "REAL DEFAULT 0"),
+                ("balance_operable", "REAL DEFAULT 0"),
+                ("duration_min", "INTEGER DEFAULT 0"),
+                ("sl_tp_method", "TEXT DEFAULT 'algo_api'"),
+                ("version", "TEXT DEFAULT 'v0.6.0'"),
             ]:
                 try:
                     cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
@@ -197,6 +237,12 @@ class TradingDatabase:
                 )
             """)
 
+            # Índice único para order_id de Binance (trazabilidad)
+            try:
+                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_id ON trades(order_id) WHERE order_id IS NOT NULL")
+            except Exception:
+                pass
+
         logger.info("Base de datos inicializada correctamente")
 
     # ─── OPERACIONES ──────────────────────────────────────────────────────────
@@ -211,9 +257,12 @@ class TradingDatabase:
                     entry_price, stop_loss, take_profit, leverage,
                     score, reasoning, status, opened_at, order_id,
                     volume_ratio, trend_1h, trend_1d, trend_1w,
-                    patterns, hour_opened, fear_greed, score_breakdown
+                    patterns, hour_opened, fear_greed, score_breakdown,
+                    balance_total, balance_reserve, balance_operable,
+                    duration_min, sl_tp_method, version
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?,
-                          ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?)
             """, (
                 trade.symbol, trade.direction, trade.trading_mode,
                 trade.amount_usd, trade.entry_price, trade.stop_loss,
@@ -229,6 +278,12 @@ class TradingDatabase:
                 getattr(trade, 'hour_opened', 0),
                 getattr(trade, 'fear_greed', 50),
                 getattr(trade, 'score_breakdown', None),
+                getattr(trade, 'balance_total', 0),
+                getattr(trade, 'balance_reserve', 0),
+                getattr(trade, 'balance_operable', 0),
+                getattr(trade, 'duration_min', 0),
+                getattr(trade, 'sl_tp_method', 'algo_api'),
+                getattr(trade, 'version', 'v0.6.0'),
             ))
             trade_id = cursor.lastrowid
             logger.info(f"Operación registrada: ID {trade_id} — {trade.symbol} {trade.direction.upper()}")
@@ -245,6 +300,19 @@ class TradingDatabase:
         """Registra el cierre de una operación."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            # Calcular duración real
+            cursor.execute("SELECT opened_at FROM trades WHERE id = ?", (trade_id,))
+            row = cursor.fetchone()
+            duration_min = 0
+            if row and row["opened_at"]:
+                try:
+                    opened = datetime.fromisoformat(row["opened_at"])
+                    now = datetime.now(timezone.utc)
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=timezone.utc)
+                    duration_min = int((now - opened).total_seconds() / 60)
+                except Exception:
+                    pass
             cursor.execute("""
                 UPDATE trades SET
                     status = 'closed',
@@ -252,11 +320,12 @@ class TradingDatabase:
                     exit_price = ?,
                     pnl_usd = ?,
                     pnl_pct = ?,
-                    close_reason = ?
+                    close_reason = ?,
+                    duration_min = ?
                 WHERE id = ?
             """, (
                 datetime.now(timezone.utc).isoformat(),
-                exit_price, pnl_usd, pnl_pct, close_reason, trade_id
+                exit_price, pnl_usd, pnl_pct, close_reason, duration_min, trade_id
             ))
             logger.info(
                 f"Operación cerrada: ID {trade_id} | "
@@ -370,6 +439,16 @@ class TradingDatabase:
                 datetime.now(timezone.utc).isoformat()
             ))
             logger.info(f"Resumen diario guardado: {date} | P&L: ${summary['total_pnl_usd']:.2f}")
+
+    def register_version(self, version: str, description: str, implemented_at: str, notes: str = None):
+        """Registra una nueva versión del agente."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR IGNORE INTO versions (version, description, implemented_at, notes)
+                VALUES (?, ?, ?, ?)
+            """, (version, description, implemented_at, notes))
+            logger.info(f"Versión registrada: {version}")
 
     def get_learning_context(self, symbol: str, direction: str, trend_1d: str = None,
                               volume_ratio: float = None, score: float = None) -> dict:
