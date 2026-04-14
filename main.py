@@ -312,15 +312,39 @@ class TradingAgent:
                         leverage    = float(p.get("leverage", 1) or 1)
                         amount_usd  = abs(notional) / leverage if leverage > 0 else entry_price * contracts
                         direction   = "long" if float(p.get("contracts", 0)) > 0 else "short"
-                        balance     = await self.executor.balance_checker.get_balance()
+
+                        # Consultar SL/TP desde órdenes condicionales (Algo API)
+                        stop_loss   = 0.0
+                        take_profit = 0.0
+                        try:
+                            raw_sym = symbol.replace("USDT", "")
+                            algo_orders = await self.collector.binance.exchange.fapiPrivateGetOpenAlgoOrders(
+                                {"symbol": symbol}
+                            )
+                            orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
+                            for o in orders:
+                                trigger = float(o.get("triggerPrice", 0) or 0)
+                                order_type = str(o.get("type", "")).lower()
+                                side = str(o.get("side", "")).lower()
+                                if trigger > 0:
+                                    if "stop" in order_type or side == "sell" and trigger < entry_price:
+                                        stop_loss = trigger
+                                    elif "take_profit" in order_type or side == "sell" and trigger > entry_price:
+                                        take_profit = trigger
+                            if stop_loss > 0 or take_profit > 0:
+                                logger.info(f"SL/TP obtenidos desde Algo API para {symbol}: SL=${stop_loss} TP=${take_profit}")
+                        except Exception as e:
+                            logger.warning(f"No se pudo obtener SL/TP para {symbol}: {e}")
+
+                        balance  = await self.executor.balance_checker.get_balance()
                         trade_id = self.db.open_trade(TradeRecord(
                             id=None, symbol=symbol,
                             direction=direction,
                             trading_mode="futures",
                             amount_usd=round(amount_usd, 2),
                             entry_price=entry_price,
-                            stop_loss=0.0,
-                            take_profit=0.0,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
                             leverage=f"{int(leverage)}x",
                             score=0.0,
                             reasoning="Sincronizado desde Binance al iniciar",
@@ -340,8 +364,8 @@ class TradingAgent:
                                             "direction": direction,
                                             "entry_price": entry_price,
                                             "amount_usd": amount_usd,
-                                            "stop_loss": 0.0,
-                                            "take_profit": 0.0})
+                                            "stop_loss": stop_loss,
+                                            "take_profit": take_profit})
                         synced += 1
                         logger.info(f"Posición sincronizada desde Binance: {symbol} | DB ID={trade_id}")
                     except Exception as e:
