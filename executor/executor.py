@@ -55,6 +55,7 @@ class TradingExecutor:
         self._last_alert_level: Optional[str] = None
         self._daily_trades = []
         self._committed_usd: float = 0.0
+        self.db = None  # Se asigna desde main.py después de inicializar
 
         logger.info(
             f"TradingExecutor inicializado | "
@@ -390,14 +391,30 @@ class TradingExecutor:
         if not self.notifications_enabled:
             return
         starting = self._daily_starting_balance or current_balance
-        # Contar solo operaciones CERRADAS en este período
-        closed_trades  = [t for t in self._daily_trades if t.get("closed")]
-        total_trades   = len(closed_trades)
-        winning_trades = len([t for t in closed_trades if t.get("pnl_usd", 0) > 0])
-        losing_trades  = len([t for t in closed_trades if t.get("pnl_usd", 0) <= 0])
-        win_rate       = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
-        # P&L real = suma de pnl_usd de trades cerrados (no diferencia de saldo)
-        total_pnl      = sum(t.get("pnl_usd", 0) for t in closed_trades)
+        # Usar BD para contar trades del día — no _daily_trades que se resetea al reiniciar
+        total_trades   = 0
+        winning_trades = 0
+        losing_trades  = 0
+        total_pnl      = 0.0
+        win_rate       = 0.0
+        try:
+            if hasattr(self, 'db') and self.db:
+                from datetime import datetime
+                today = datetime.now().strftime("%Y-%m-%d")
+                summary = self.db.get_daily_summary(today)
+                total_trades   = summary.get("total_trades", 0)
+                winning_trades = summary.get("winning_trades", 0)
+                losing_trades  = summary.get("losing_trades", 0)
+                total_pnl      = summary.get("total_pnl_usd", 0.0)
+                win_rate       = summary.get("win_rate", 0.0)
+        except Exception:
+            # Fallback a _daily_trades si BD no disponible
+            closed_trades  = [t for t in self._daily_trades if t.get("closed")]
+            total_trades   = len(closed_trades)
+            winning_trades = len([t for t in closed_trades if t.get("pnl_usd", 0) > 0])
+            losing_trades  = len([t for t in closed_trades if t.get("pnl_usd", 0) <= 0])
+            win_rate       = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+            total_pnl      = sum(t.get("pnl_usd", 0) for t in closed_trades)
         self.notifier.notify_daily_report(
             date=datetime.now().strftime("%d/%m/%Y"),
             total_trades=total_trades,

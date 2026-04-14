@@ -7,7 +7,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -76,6 +76,8 @@ class TradingAgent:
             )
 
         # ── Cargar posiciones abiertas de DB al iniciar ──────────────────
+        # Pasar referencia de DB al executor para el reporte periódico
+        self.executor.db = self.db
         await self._restore_tracked_positions()
         # ──────────────────────────────────────────────────────────────────
 
