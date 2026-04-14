@@ -79,7 +79,8 @@ class PromptBuilder:
         snapshot: CollectedSnapshot,
         available_capital: float,
         coingecko_sentiment: dict = None,
-        rss_headlines: list = None
+        rss_headlines: list = None,
+        learning_context: dict = None
     ) -> str:
         ctx = snapshot.market_context
         ind = signal.indicators_1h
@@ -206,6 +207,9 @@ Guía de tamaño según tipo de mercado:
 - Mercado normal (vol 0.8-1.5x):   usar ${ available_capital * 0.30:.2f} USD (30%)
 - Mercado activo (vol > 1.5x):     usar ${ available_capital * 0.40:.2f} USD (40%)
 
+=== TU HISTORIAL RECIENTE ===
+{self._format_learning_context(learning_context, signal.direction, signal.symbol)}
+
 === TU DECISIÓN COMO TRADER PROFESIONAL ===
 Recuerda: no esperes el trade perfecto. Un trader profesional opera en todos los mercados
 adaptando el tamaño. Si las señales son razonables aunque no perfectas, opera con tamaño reducido.
@@ -226,6 +230,50 @@ Analiza:
 Responde solo con el JSON."""
 
         return prompt
+
+    def _format_learning_context(self, ctx: dict, direction: str, symbol: str) -> str:
+        if not ctx or ctx.get("insufficient_data"):
+            total = ctx.get("total_trades", 0) if ctx else 0
+            return f"Datos insuficientes para aprendizaje ({total} trades cerrados — mínimo 5 requeridos)"
+
+        lines = []
+        total = ctx.get("total_trades", 0)
+        g = ctx.get("general", {})
+        gen_wr = round(g.get("wins", 0) / g["total"] * 100) if g.get("total") else 0
+        lines.append(f"Total trades cerrados: {total} | Win rate general: {gen_wr}%")
+
+        d = ctx.get("by_direction", {})
+        if d.get("total"):
+            dir_wr = round(d.get("wins", 0) / d["total"] * 100)
+            dir_str = "LONG" if direction == "long" else "SHORT"
+            lines.append(f"En {dir_str}: {d.get('wins', 0)}/{d['total']} ganados ({dir_wr}%)")
+
+        t = ctx.get("by_trend_1d")
+        if t and t.get("total"):
+            trend_wr = round(t.get("wins", 0) / t["total"] * 100)
+            lines.append(f"En tendencia 1D similar: {t.get('wins', 0)}/{t['total']} ganados ({trend_wr}%)")
+            if trend_wr < 30 and t["total"] >= 3:
+                lines.append("⚠️ ADVERTENCIA: Historial muy negativo en estas condiciones — considera no operar o reducir tamaño al mínimo")
+
+        v = ctx.get("by_volume")
+        if v and v.get("total"):
+            vol_wr = round(v.get("wins", 0) / v["total"] * 100)
+            lines.append(f"Con volumen {v['bucket']}: {v.get('wins', 0)}/{v['total']} ganados ({vol_wr}%)")
+
+        s = ctx.get("by_score")
+        if s and s.get("total"):
+            score_wr = round(s.get("wins", 0) / s["total"] * 100)
+            lines.append(f"Con score {s['range']}/100: {s.get('wins', 0)}/{s['total']} ganados ({score_wr}%)")
+
+        recent = ctx.get("recent_same_symbol", [])
+        if recent:
+            lines.append(f"Últimos trades en {symbol}:")
+            for t in recent:
+                pnl = t.get("pnl_usd", 0) or 0
+                emoji = "✅" if pnl > 0 else "❌"
+                lines.append(f"  {emoji} {t.get('direction','').upper()} | P&L: ${pnl:.2f} | Razón: {t.get('close_reason','?')} | Tendencia 1D: {t.get('trend_1d','?')}")
+
+        return "\n".join(lines)
 
     def _format_candlestick_patterns(self, indicators) -> str:
         patterns = getattr(indicators, 'candlestick_patterns', None) or []

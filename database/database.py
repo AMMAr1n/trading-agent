@@ -48,6 +48,14 @@ class TradeRecord:
     pnl_pct: Optional[float]
     close_reason: Optional[str] # "take_profit" | "stop_loss" | "manual" | "timeout"
     order_id: Optional[str]     # ID de la orden en Binance
+    volume_ratio: float = 0.0
+    trend_1h: Optional[str] = None
+    trend_1d: Optional[str] = None
+    trend_1w: Optional[str] = None
+    patterns: Optional[str] = None
+    hour_opened: int = 0
+    fear_greed: int = 50
+    score_breakdown: Optional[str] = None
 
 
 @dataclass
@@ -128,9 +136,33 @@ class TradingDatabase:
                     pnl_usd REAL,
                     pnl_pct REAL,
                     close_reason TEXT,
-                    order_id TEXT
+                    order_id TEXT,
+                    volume_ratio REAL DEFAULT 0,
+                    trend_1h TEXT,
+                    trend_1d TEXT,
+                    trend_1w TEXT,
+                    patterns TEXT,
+                    hour_opened INTEGER DEFAULT 0,
+                    fear_greed INTEGER DEFAULT 50,
+                    score_breakdown TEXT
                 )
             """)
+
+            # Migración: agregar columnas de contexto si no existen (para BD existentes)
+            for col, col_type in [
+                ("volume_ratio", "REAL DEFAULT 0"),
+                ("trend_1h", "TEXT"),
+                ("trend_1d", "TEXT"),
+                ("trend_1w", "TEXT"),
+                ("patterns", "TEXT"),
+                ("hour_opened", "INTEGER DEFAULT 0"),
+                ("fear_greed", "INTEGER DEFAULT 50"),
+                ("score_breakdown", "TEXT"),
+            ]:
+                try:
+                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass  # columna ya existe
 
             # Tabla de señales detectadas
             cursor.execute("""
@@ -177,15 +209,26 @@ class TradingDatabase:
                 INSERT INTO trades (
                     symbol, direction, trading_mode, amount_usd,
                     entry_price, stop_loss, take_profit, leverage,
-                    score, reasoning, status, opened_at, order_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                    score, reasoning, status, opened_at, order_id,
+                    volume_ratio, trend_1h, trend_1d, trend_1w,
+                    patterns, hour_opened, fear_greed, score_breakdown
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade.symbol, trade.direction, trade.trading_mode,
                 trade.amount_usd, trade.entry_price, trade.stop_loss,
                 trade.take_profit, trade.leverage, trade.score,
                 trade.reasoning,
                 datetime.now(timezone.utc).isoformat(),
-                trade.order_id
+                trade.order_id,
+                getattr(trade, 'volume_ratio', 0),
+                getattr(trade, 'trend_1h', None),
+                getattr(trade, 'trend_1d', None),
+                getattr(trade, 'trend_1w', None),
+                getattr(trade, 'patterns', None),
+                getattr(trade, 'hour_opened', 0),
+                getattr(trade, 'fear_greed', 50),
+                getattr(trade, 'score_breakdown', None),
             ))
             trade_id = cursor.lastrowid
             logger.info(f"Operación registrada: ID {trade_id} — {trade.symbol} {trade.direction.upper()}")
@@ -327,6 +370,107 @@ class TradingDatabase:
                 datetime.now(timezone.utc).isoformat()
             ))
             logger.info(f"Resumen diario guardado: {date} | P&L: ${summary['total_pnl_usd']:.2f}")
+
+    def get_learning_context(self, symbol: str, direction: str, trend_1d: str = None,
+                              volume_ratio: float = None, score: float = None) -> dict:
+        """
+        Consulta el historial de trades para generar contexto de aprendizaje.
+        Retorna estadísticas por condición para incluir en el prompt de Claude.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Total de trades cerrados
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE status='closed'")
+            total_closed = cursor.fetchone()[0]
+
+            if total_closed < 5:
+                return {"insufficient_data": True, "total_trades": total_closed}
+
+            # Win rate general (últimos 30 trades)
+            cursor.execute("""
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                FROM trades WHERE status='closed'
+                ORDER BY closed_at DESC LIMIT 30
+            """)
+            row = cursor.fetchone()
+            general_total = row["total"] or 0
+            general_wins  = row["wins"] or 0
+
+            # Win rate por dirección
+            cursor.execute("""
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                FROM trades WHERE status='closed' AND direction=?
+            """, (direction,))
+            row = cursor.fetchone()
+            dir_total = row["total"] or 0
+            dir_wins  = row["wins"] or 0
+
+            # Win rate en tendencia 1D similar
+            trend_stats = None
+            if trend_1d:
+                cursor.execute("""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                    FROM trades WHERE status='closed' AND direction=? AND trend_1d=?
+                """, (direction, trend_1d))
+                row = cursor.fetchone()
+                if row["total"] and row["total"] >= 2:
+                    trend_stats = {"total": row["total"], "wins": row["wins"] or 0}
+
+            # Win rate por rango de volumen
+            vol_stats = None
+            if volume_ratio is not None:
+                vol_bucket = "high" if volume_ratio >= 1.5 else "low" if volume_ratio < 0.8 else "normal"
+                if vol_bucket == "high":
+                    vol_cond = "volume_ratio >= 1.5"
+                elif vol_bucket == "low":
+                    vol_cond = "volume_ratio < 0.8"
+                else:
+                    vol_cond = "volume_ratio >= 0.8 AND volume_ratio < 1.5"
+                cursor.execute(f"""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                    FROM trades WHERE status='closed' AND direction=? AND {vol_cond}
+                """, (direction,))
+                row = cursor.fetchone()
+                if row["total"] and row["total"] >= 2:
+                    vol_stats = {"bucket": vol_bucket, "total": row["total"], "wins": row["wins"] or 0}
+
+            # Win rate por rango de score
+            score_stats = None
+            if score is not None:
+                score_low = int(score // 10) * 10
+                score_high = score_low + 10
+                cursor.execute("""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins
+                    FROM trades WHERE status='closed' AND score >= ? AND score < ?
+                """, (score_low, score_high))
+                row = cursor.fetchone()
+                if row["total"] and row["total"] >= 2:
+                    score_stats = {"range": f"{score_low}-{score_high}", "total": row["total"], "wins": row["wins"] or 0}
+
+            # Últimos 3 trades del mismo símbolo
+            cursor.execute("""
+                SELECT direction, pnl_usd, close_reason, trend_1d, score
+                FROM trades WHERE status='closed' AND symbol=?
+                ORDER BY closed_at DESC LIMIT 3
+            """, (symbol,))
+            symbol_trades = [dict(r) for r in cursor.fetchall()]
+
+            return {
+                "insufficient_data": False,
+                "total_trades": total_closed,
+                "general": {"total": general_total, "wins": general_wins},
+                "by_direction": {"total": dir_total, "wins": dir_wins},
+                "by_trend_1d": trend_stats,
+                "by_volume": vol_stats,
+                "by_score": score_stats,
+                "recent_same_symbol": symbol_trades,
+            }
 
     def get_performance_stats(self, days: int = 30) -> dict:
         """Estadísticas de rendimiento de los últimos N días."""

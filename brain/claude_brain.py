@@ -60,7 +60,8 @@ class ClaudeBrain:
         snapshot: CollectedSnapshot,
         available_capital: float,
         coingecko_sentiment: dict = None,
-        rss_headlines: list = None
+        rss_headlines: list = None,
+        learning_context: dict = None
     ) -> Optional[TradeDecision]:
         """
         Llama a Claude y obtiene una decisión de trading.
@@ -68,6 +69,7 @@ class ClaudeBrain:
         signal:            Señal del analizador técnico
         snapshot:          Snapshot completo con contexto macro
         available_capital: Capital disponible en USDT
+        learning_context:  Historial de aprendizaje desde la BD
 
         Retorna None si Claude no puede tomar una decisión.
         """
@@ -80,35 +82,26 @@ class ClaudeBrain:
         prompt = self.prompt_builder.build(
             signal, snapshot, available_capital,
             coingecko_sentiment=coingecko_sentiment,
-            rss_headlines=rss_headlines or []
+            rss_headlines=rss_headlines,
+            learning_context=learning_context
         )
 
         try:
-            # Llamar a Claude API sin web search para reducir costos
-            # Web search se reactivará cuando el agente sea rentable
-            # Contexto de noticias llega via CoinGecko y RSS feeds
+            # Llamar a Claude API
             response = self.client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=MAX_TOKENS,
                 system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
             )
 
+            # Extraer el texto de la respuesta
             if not response.content:
                 logger.error("Claude devolvió respuesta vacía")
                 return None
-
-            # Extraer texto de la respuesta
-            response_text = None
-            for block in response.content:
-                block_type = getattr(block, "type", "")
-                if block_type == "text" and block.text and block.text.strip():
-                    response_text = block.text.strip()
-
-            if not response_text:
-                logger.error(f"Claude no devolvió texto. Bloques: {[getattr(b, 'type', '') for b in response.content]}")
-                return None
-
+            response_text = response.content[0].text.strip()
             logger.debug(f"Respuesta de Claude: {response_text[:200]}...")
 
             # Parsear el JSON

@@ -192,10 +192,25 @@ class TradingAgent:
         except Exception as e:
             logger.warning(f"RSS no disponible para {signal.symbol}: {e}")
 
+        # Consultar historial de aprendizaje desde BD
+        learning_context = None
+        try:
+            ind_1d = getattr(signal, 'indicators_1d', None)
+            learning_context = self.db.get_learning_context(
+                symbol=signal.symbol,
+                direction=signal.direction,
+                trend_1d=ind_1d.trend if ind_1d else None,
+                volume_ratio=signal.indicators_1h.volume.ratio,
+                score=signal.score,
+            )
+        except Exception as e:
+            logger.warning(f"No se pudo obtener contexto de aprendizaje: {e}")
+
         decision = self.brain.decide(
             signal, snapshot, balance.operable,
             coingecko_sentiment=coingecko_sentiment,
-            rss_headlines=rss_headlines
+            rss_headlines=rss_headlines,
+            learning_context=learning_context,
         )
         if not decision:
             logger.warning(f"Claude no pudo decidir para {signal.symbol}")
@@ -212,6 +227,15 @@ class TradingAgent:
 
         if result and result.success:
             # ── Registrar en DB primero para obtener trade_id ─────────────
+            # Extraer contexto de la señal para el pipeline de aprendizaje
+            ind_1h  = signal.indicators_1h
+            ind_1d  = getattr(signal, 'indicators_1d', None)
+            ind_1w  = getattr(signal, 'indicators_1w', None)
+            patterns_list = getattr(ind_1h, 'candlestick_patterns', None) or []
+            score_breakdown = (
+                f"EMA:{signal.score:.0f} Vol:{ind_1h.volume.ratio:.2f}x "
+                f"RSI:{ind_1h.rsi.value:.1f} MACD:{ind_1h.macd.signal}"
+            )
             trade_id = self.db.open_trade(TradeRecord(
                 id=None, symbol=decision.symbol,
                 direction=decision.direction,
@@ -227,7 +251,15 @@ class TradingAgent:
                 opened_at=datetime.now(),
                 closed_at=None, exit_price=None,
                 pnl_usd=None, pnl_pct=None,
-                close_reason=None, order_id=result.order_id
+                close_reason=None, order_id=result.order_id,
+                volume_ratio=ind_1h.volume.ratio,
+                trend_1h=ind_1h.trend,
+                trend_1d=ind_1d.trend if ind_1d else None,
+                trend_1w=ind_1w.trend if ind_1w else None,
+                patterns=",".join(patterns_list[:5]) if patterns_list else None,
+                hour_opened=datetime.now(timezone.utc).hour,
+                fear_greed=snapshot.market_context.fear_greed_index,
+                score_breakdown=score_breakdown,
             ))
             logger.info(f"Operación registrada en DB: ID {trade_id}")
 
@@ -285,53 +317,11 @@ class TradingAgent:
                     logger.info(f"Posición restaurada: {symbol} | DB ID={trade['id']}")
                 else:
                     logger.info(f"Posición {symbol} (ID {trade['id']}) no está en Binance — cerrando en DB")
-                    # Intentar obtener precio real de cierre desde historial de Binance
-                    exit_price = 0.0
-                    pnl_usd = 0.0
-                    pnl_pct = 0.0
-                    try:
-                        raw_sym = symbol.replace("USDT", "/USDT:USDT")
-                        trades_history = await self.collector.binance.exchange.fetch_my_trades(
-                            raw_sym, limit=5
-                        )
-                        if trades_history:
-                            last_trade = trades_history[-1]
-                            exit_price = float(last_trade.get("price", 0) or 0)
-                            entry_p = trade.get("entry_price", 0) or 0
-                            qty = trade.get("amount_usd", 0) / entry_p if entry_p > 0 else 0
-                            direction = trade.get("direction", "long")
-                            if exit_price > 0 and entry_p > 0 and qty > 0:
-                                diff = (exit_price - entry_p) if direction == "long" else (entry_p - exit_price)
-                                pnl_usd = round(diff * qty, 2)
-                                pnl_pct = round((diff / entry_p) * 100, 2)
-                    except Exception as e:
-                        logger.warning(f"No se pudo obtener P&L real para {symbol}: {e}")
                     self.db.close_trade(
                         trade_id=trade["id"],
-                        exit_price=exit_price, pnl_usd=pnl_usd, pnl_pct=pnl_pct,
-                        close_reason="cerrada_por_binance"
+                        exit_price=0, pnl_usd=0, pnl_pct=0,
+                        close_reason="no_encontrada_al_reiniciar"
                     )
-                    # Notificar cierre con P&L real si hay trading_executor
-                    if pnl_usd != 0 and hasattr(self, 'executor') and self.executor.notifications_enabled:
-                        entry_p = trade.get("entry_price", 0) or 0
-                        amount_usd = trade.get("amount_usd", 0) or 0
-                        opened_at_str = trade.get("opened_at", "")
-                        try:
-                            opened_at = datetime.fromisoformat(opened_at_str) if opened_at_str else datetime.now(timezone.utc)
-                            dur_min = int((datetime.now(timezone.utc) - opened_at.replace(tzinfo=timezone.utc)).total_seconds() / 60)
-                        except Exception:
-                            dur_min = 0
-                        import asyncio as _ai
-                        _ai.ensure_future(self.executor.notify_trade_closed(
-                            symbol=symbol,
-                            direction=trade.get("direction", "long"),
-                            pnl_usd=pnl_usd, pnl_pct=pnl_pct,
-                            duration_min=dur_min,
-                            close_reason="cerrada_por_binance",
-                            amount_usd=amount_usd,
-                            entry_price=entry_p,
-                            exit_price=exit_price,
-                        ))
 
             logger.info(f"Posiciones restauradas: {restored}/{len(open_trades)}")
 
