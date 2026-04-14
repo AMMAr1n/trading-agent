@@ -285,11 +285,53 @@ class TradingAgent:
                     logger.info(f"Posición restaurada: {symbol} | DB ID={trade['id']}")
                 else:
                     logger.info(f"Posición {symbol} (ID {trade['id']}) no está en Binance — cerrando en DB")
+                    # Intentar obtener precio real de cierre desde historial de Binance
+                    exit_price = 0.0
+                    pnl_usd = 0.0
+                    pnl_pct = 0.0
+                    try:
+                        raw_sym = symbol.replace("USDT", "/USDT:USDT")
+                        trades_history = await self.collector.binance.exchange.fetch_my_trades(
+                            raw_sym, limit=5
+                        )
+                        if trades_history:
+                            last_trade = trades_history[-1]
+                            exit_price = float(last_trade.get("price", 0) or 0)
+                            entry_p = trade.get("entry_price", 0) or 0
+                            qty = trade.get("amount_usd", 0) / entry_p if entry_p > 0 else 0
+                            direction = trade.get("direction", "long")
+                            if exit_price > 0 and entry_p > 0 and qty > 0:
+                                diff = (exit_price - entry_p) if direction == "long" else (entry_p - exit_price)
+                                pnl_usd = round(diff * qty, 2)
+                                pnl_pct = round((diff / entry_p) * 100, 2)
+                    except Exception as e:
+                        logger.warning(f"No se pudo obtener P&L real para {symbol}: {e}")
                     self.db.close_trade(
                         trade_id=trade["id"],
-                        exit_price=0, pnl_usd=0, pnl_pct=0,
-                        close_reason="no_encontrada_al_reiniciar"
+                        exit_price=exit_price, pnl_usd=pnl_usd, pnl_pct=pnl_pct,
+                        close_reason="cerrada_por_binance"
                     )
+                    # Notificar cierre con P&L real si hay trading_executor
+                    if pnl_usd != 0 and hasattr(self, 'executor') and self.executor.notifications_enabled:
+                        entry_p = trade.get("entry_price", 0) or 0
+                        amount_usd = trade.get("amount_usd", 0) or 0
+                        opened_at_str = trade.get("opened_at", "")
+                        try:
+                            opened_at = datetime.fromisoformat(opened_at_str) if opened_at_str else datetime.now(timezone.utc)
+                            dur_min = int((datetime.now(timezone.utc) - opened_at.replace(tzinfo=timezone.utc)).total_seconds() / 60)
+                        except Exception:
+                            dur_min = 0
+                        import asyncio as _ai
+                        _ai.ensure_future(self.executor.notify_trade_closed(
+                            symbol=symbol,
+                            direction=trade.get("direction", "long"),
+                            pnl_usd=pnl_usd, pnl_pct=pnl_pct,
+                            duration_min=dur_min,
+                            close_reason="cerrada_por_binance",
+                            amount_usd=amount_usd,
+                            entry_price=entry_p,
+                            exit_price=exit_price,
+                        ))
 
             logger.info(f"Posiciones restauradas: {restored}/{len(open_trades)}")
 
