@@ -172,6 +172,12 @@ Resistencia más cercana:  {nearest_resistance} ({resistance_dist})
 Stop-loss sugerido LONG:  ${signal.levels.dynamic_stop_loss_long:,.4f} (riesgo: {signal.levels.risk_pct_long:.1f}%)
 Stop-loss sugerido SHORT: ${signal.levels.dynamic_stop_loss_short:,.4f} (riesgo: {signal.levels.risk_pct_short:.1f}%)
 Take-profit sugerido:     ${signal.suggested_tp:,.4f}
+R/R sugerido:             1:{round((abs(signal.suggested_tp - signal.current_price) / abs(signal.levels.dynamic_stop_loss_long - signal.current_price if signal.direction == "long" else signal.levels.dynamic_stop_loss_short - signal.current_price)), 1) if signal.current_price > 0 else "N/A"}
+
+IMPORTANTE: El take_profit que incluyas en el JSON DEBE producir un R/R ≥ 1:2.
+Calcula así: |take_profit - precio_entrada| / |stop_loss - precio_entrada| ≥ 2.0
+Si el TP sugerido no cumple 1:2, ajústalo hasta que lo cumpla.
+El R/R en tu "reasoning" DEBE coincidir con el R/R real calculado entre los precios del JSON.
 
 === CONTEXTO MACRO ===
 BTC Dominance:    {ctx.btc_dominance:.1f}%
