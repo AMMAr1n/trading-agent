@@ -1,22 +1,27 @@
 """
-analyzer/ — Motor de análisis técnico
+v0.7.0 — Nuevos módulos del analyzer
 
-Exporta las clases principales para uso desde otros módulos.
+Módulos:
+  patterns.py       — Detector de chart patterns (12 formaciones)
+  breakout.py       — Validador de breakouts
+  targets.py        — Calculador de targets por geometría
+  mtf_alignment.py  — Alineación multi-timeframe
+  regime.py         — Detector de régimen de mercado
+  learning.py       — Motor de aprendizaje evolutivo
 """
 
-from .analyzer import TechnicalAnalyzer, AnalysisResult, TradingSignal
-from .indicators import TechnicalIndicatorCalculator, TechnicalIndicators
-from .levels import SupportResistanceDetector, SupportResistanceResult
-from .scorer import SignalScorer, ScoreBreakdown
+from .patterns import PatternDetector, DetectedPattern
+from .breakout import BreakoutValidator, BreakoutValidation
+from .targets import TargetCalculator, PatternTargets
+from .mtf_alignment import MTFAligner, MTFAlignment
+from .regime import RegimeDetector, MarketRegime
+from .learning import LearningEngine, LearningContext
 
 __all__ = [
-    "TechnicalAnalyzer",
-    "AnalysisResult",
-    "TradingSignal",
-    "TechnicalIndicatorCalculator",
-    "TechnicalIndicators",
-    "SupportResistanceDetector",
-    "SupportResistanceResult",
-    "SignalScorer",
-    "ScoreBreakdown",
+    "PatternDetector", "DetectedPattern",
+    "BreakoutValidator", "BreakoutValidation",
+    "TargetCalculator", "PatternTargets",
+    "MTFAligner", "MTFAlignment",
+    "RegimeDetector", "MarketRegime",
+    "LearningEngine", "LearningContext",
 ]

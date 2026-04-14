@@ -1,7 +1,7 @@
 """
 prompt_builder.py — Constructor del prompt para Claude
-Responsabilidad: tomar toda la información del analizador y el
-contexto macro y construir un prompt claro para que Claude decida.
+v0.7.0 — Añade secciones de chart patterns, breakout, targets,
+régimen de mercado, y experiencia del trader (reemplaza historial simple).
 """
 
 import os
@@ -24,26 +24,34 @@ FILOSOFÍA DE TRADING:
 - En mercados con momentum usas posiciones más grandes con 2x-3x cuando el contexto lo justifica
 - Nunca te quedas paralizado esperando el trade "perfecto" — el mercado siempre ofrece oportunidades
 - La disciplina supera a la intuición: sigues las reglas incluso cuando el mercado parece obvio
+- PRIORIZAS chart patterns confirmados sobre indicadores individuales — un patrón con breakout de volumen es la señal más fuerte
 
 REGLAS DE RIESGO INVIOLABLES:
 1. Nunca arriesgues más del capital operable disponible
 2. Ratio mínimo riesgo/recompensa: 1:2 (take-profit = mínimo el doble del riesgo)
-3. Stop-loss siempre basado en soporte/resistencia — nunca arbitrario
+3. Stop-loss siempre basado en estructura del patrón o soporte/resistencia — nunca arbitrario
 4. Spot solo puede ser LONG — nunca short en spot
 5. Futuros puede ser LONG o SHORT según la tendencia dominante
 6. En mercados con Fear & Greed extremo (< 15 o > 85), reducir tamaño de posición al 50%
 7. Nunca operar activos en HOLD
+8. Si un chart pattern dice "EVITAR" en tu historial, NO entrar aunque el score sea alto
+9. Si el régimen de mercado es VOLATILE, reducir tamaño y ampliar SL
 
 CRITERIOS DE ENTRADA POR TIPO DE MERCADO:
-- Mercado quieto (volumen < 0.8x, score 30-44): Operar con 1x, monto 15-20% del capital. El objetivo es aprender y mantener actividad.
+- Mercado quieto (volumen < 0.8x, score 30-44): Operar con 1x, monto 15-20% del capital.
 - Mercado normal (volumen 0.8-1.5x, score 45-64): Operar con 1x, monto 25-30% del capital.
 - Mercado activo (volumen 1.5-2x, score 65-74): Operar con 2x, monto 35-40% del capital.
 - Mercado fuerte (volumen > 2x, score 75+): Operar con 3x, monto hasta 40% del capital.
 
+PRIORIDAD DE TARGETS:
+1. Si hay chart pattern con target geométrico válido → usar ese TP
+2. Si hay breakout confirmado con target de proyección → usar ese TP
+3. Si no hay patrón → usar TP basado en soporte/resistencia y R:R 1:2
+
 GESTIÓN DEL STOP-LOSS:
-- Usa el stop-loss dinámico calculado basado en soportes/resistencias reales
-- El stop debe ser lógico: debajo del soporte para longs, sobre resistencia para shorts
-- Nunca muevas el stop en contra de tu posición
+- PRIMERO: usar el punto de invalidación del patrón si existe
+- SEGUNDO: usar soporte/resistencia real
+- NUNCA: usar un porcentaje fijo arbitrario
 
 FORMATO DE RESPUESTA:
 Responde ÚNICAMENTE con un JSON válido con esta estructura exacta:
@@ -63,10 +71,6 @@ Responde ÚNICAMENTE con un JSON válido con esta estructura exacta:
 
 
 class PromptBuilder:
-    """
-    Construye el prompt completo para Claude con toda la información
-    necesaria para tomar una decisión de trading profesional.
-    """
 
     def __init__(self):
         self.reserve_pct = float(os.getenv("RESERVE_PCT", "10")) / 100
@@ -80,13 +84,14 @@ class PromptBuilder:
         available_capital: float,
         coingecko_sentiment: dict = None,
         rss_headlines: list = None,
-        learning_context: dict = None
+        learning_context=None,        # Ahora recibe LearningContext objeto
+        mtf_alignment=None,           # NUEVO — resultado de MTFAligner
     ) -> str:
         ctx = snapshot.market_context
         ind = signal.indicators_1h
         vobo_threshold = available_capital * self.vobo_min_pct
 
-        # Determinar tipo de mercado para guiar a Claude
+        # Tipo de mercado
         volume_ratio = ind.volume.ratio
         if volume_ratio >= 2.0:
             market_type = "FUERTE (alto volumen — oportunidad clara)"
@@ -99,14 +104,13 @@ class PromptBuilder:
         else:
             market_type = "MUY QUIETO (volumen muy bajo — posición mínima si opera)"
 
-        # Niveles de precio con manejo seguro de listas vacías
+        # Niveles de precio
         nearest_support = f"${signal.levels.nearest_support:,.4f}" if signal.levels.nearest_support else "No detectado"
         nearest_resistance = f"${signal.levels.nearest_resistance:,.4f}" if signal.levels.nearest_resistance else "No detectado"
-
         support_dist = f"{signal.levels.supports[0].distance_pct:.1f}% abajo" if signal.levels.supports else "N/A"
         resistance_dist = f"{signal.levels.resistances[0].distance_pct:.1f}% arriba" if signal.levels.resistances else "N/A"
 
-        # Contexto del timeframe 2h si está disponible
+        # Confirmación 2h
         confirmation_4h = ""
         if signal.indicators_4h:
             ind4h = signal.indicators_4h
@@ -118,7 +122,7 @@ MACD 2h:          {ind4h.macd.signal}
 Dirección 2h:     {ind4h.suggested_direction}
 Alineación 1h/2h: {'✅ ALINEADOS' if ind4h.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN — considera reducir tamaño'}"""
 
-        # Contexto diario — tendencia mayor
+        # Contexto diario
         daily_context = ""
         if hasattr(signal, 'indicators_1d') and signal.indicators_1d:
             ind1d = signal.indicators_1d
@@ -127,11 +131,10 @@ Alineación 1h/2h: {'✅ ALINEADOS' if ind4h.suggested_direction == signal.direc
 Tendencia diaria: {ind1d.trend}
 RSI diario:       {ind1d.rsi.value:.1f} ({ind1d.rsi.signal})
 MACD diario:      {ind1d.macd.signal}
-EMA 20/50/200:    ${ind1d.ema_20:,.2f} / ${ind1d.ema_50:,.2f} / ${ind1d.ema_200:,.2f}
 Dirección diaria: {ind1d.suggested_direction}
 Alineación 1h/1d: {'✅ ALINEADOS' if ind1d.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN MAYOR'}"""
 
-        # Contexto semanal — tendencia macro
+        # Contexto semanal
         weekly_context = ""
         if hasattr(signal, 'indicators_1w') and signal.indicators_1w:
             ind1w = signal.indicators_1w
@@ -139,10 +142,32 @@ Alineación 1h/1d: {'✅ ALINEADOS' if ind1d.suggested_direction == signal.direc
 === TENDENCIA SEMANAL (1W) — MACRO ===
 Tendencia semanal: {ind1w.trend}
 RSI semanal:       {ind1w.rsi.value:.1f} ({ind1w.rsi.signal})
-MACD semanal:      {ind1w.macd.signal}
-EMA 20/50/200:     ${ind1w.ema_20:,.2f} / ${ind1w.ema_50:,.2f} / ${ind1w.ema_200:,.2f}
 Dirección semanal: {ind1w.suggested_direction}
 Alineación 1h/1w:  {'✅ ALINEADOS — tendencia macro favorable' if ind1w.suggested_direction == signal.direction else '⚠️ CONTRADICCIÓN MACRO — operar con extrema cautela'}"""
+
+        # ─── SECCIONES NUEVAS v0.7.0 ─────────────────────────────────────
+
+        # Chart patterns + breakout + targets + regime (del MTFAligner)
+        mtf_section = ""
+        if mtf_alignment:
+            mtf_section = f"""
+
+{mtf_alignment.prompt_section()}"""
+
+        # Experiencia del trader (del LearningEngine)
+        learning_section = ""
+        if learning_context and hasattr(learning_context, 'prompt_section'):
+            # Nuevo objeto LearningContext con método prompt_section()
+            learning_section = learning_context.prompt_section()
+        elif learning_context and isinstance(learning_context, dict):
+            # Fallback al formato antiguo por compatibilidad
+            learning_section = self._format_learning_context_legacy(
+                learning_context, signal.direction, signal.symbol
+            )
+        else:
+            learning_section = "Datos insuficientes para aprendizaje (menos de 5 trades cerrados)"
+
+        # ─── FIN SECCIONES NUEVAS ─────────────────────────────────────────
 
         search_hint = signal.symbol.replace("USDT", "")
         prompt = f"""=== SEÑAL DE TRADING DETECTADA ===
@@ -162,10 +187,7 @@ Volumen:            {ind.volume.ratio:.2f}x el promedio ({ind.volume.signal})
 EMA 20/50/200:      ${ind.ema_20:,.2f} / ${ind.ema_50:,.2f} / ${ind.ema_200:,.2f}
 Tendencia general:  {ind.trend}
 Patrones de velas:  {', '.join(getattr(ind, 'candlestick_patterns', []) or []) or 'ninguno detectado'}
-{confirmation_4h}{daily_context}{weekly_context}
-
-=== PATRONES DE VELAS (últimas 3 velas 1h) ===
-{self._format_candlestick_patterns(signal.indicators_1h)}
+{confirmation_4h}{daily_context}{weekly_context}{mtf_section}
 
 === NIVELES DE PRECIO ===
 Soporte más cercano:      {nearest_support} ({support_dist})
@@ -176,9 +198,7 @@ Take-profit sugerido:     ${signal.suggested_tp:,.4f}
 R/R sugerido:             1:{round((abs(signal.suggested_tp - signal.current_price) / abs(signal.levels.dynamic_stop_loss_long - signal.current_price if signal.direction == "long" else signal.levels.dynamic_stop_loss_short - signal.current_price)), 1) if signal.current_price > 0 else "N/A"}
 
 IMPORTANTE: El take_profit que incluyas en el JSON DEBE producir un R/R ≥ 1:2.
-Calcula así: |take_profit - precio_entrada| / |stop_loss - precio_entrada| ≥ 2.0
-Si el TP sugerido no cumple 1:2, ajústalo hasta que lo cumpla.
-El R/R en tu "reasoning" DEBE coincidir con el R/R real calculado entre los precios del JSON.
+Si hay chart pattern con target geométrico, PRIORIZA ese target sobre el sugerido genérico.
 
 === CONTEXTO MACRO ===
 BTC Dominance:    {ctx.btc_dominance:.1f}%
@@ -207,36 +227,32 @@ Guía de tamaño según tipo de mercado:
 - Mercado normal (vol 0.8-1.5x):   usar ${ available_capital * 0.30:.2f} USD (30%)
 - Mercado activo (vol > 1.5x):     usar ${ available_capital * 0.40:.2f} USD (40%)
 
-=== TU HISTORIAL RECIENTE ===
-{self._format_learning_context(learning_context, signal.direction, signal.symbol)}
+{learning_section}
 
 === TU DECISIÓN COMO TRADER PROFESIONAL ===
 Recuerda: no esperes el trade perfecto. Un trader profesional opera en todos los mercados
 adaptando el tamaño. Si las señales son razonables aunque no perfectas, opera con tamaño reducido.
 
-IMPORTANTE — BÚSQUEDA WEB:
-Tienes acceso a web_search. ÚSALO para buscar noticias recientes ANTES de decidir.
-Busca: "{search_hint} news today" o "{search_hint} price prediction" o eventos relevantes.
-Si encuentras noticias negativas importantes (hack, regulación, dump ballena) → NO operes.
-Si encuentras noticias positivas (partnership, listing, upgrade) → considera aumentar tamaño.
-
 Analiza:
-1. ¿Qué dicen las noticias recientes sobre {search_hint}?
-2. ¿El setup técnico justifica una entrada ahora?
-3. ¿Qué tamaño es apropiado dado el tipo de mercado y las noticias?
-4. ¿Dónde poner el stop-loss basado en niveles reales?
-5. ¿Qué apalancamiento corresponde al score y volumen actuales?
+1. ¿Hay un chart pattern confirmado? Si sí, usa su target y SL.
+2. ¿El breakout está validado con volumen? Si no, reduce tamaño.
+3. ¿El régimen de mercado favorece este tipo de entrada?
+4. ¿Tu historial dice que este patrón te funciona o no?
+5. ¿Qué tamaño y apalancamiento son apropiados?
 
 Responde solo con el JSON."""
 
         return prompt
 
-    def _format_learning_context(self, ctx: dict, direction: str, symbol: str) -> str:
+    # ─── FORMATTERS (sin cambios) ─────────────────────────────────────
+
+    def _format_learning_context_legacy(self, ctx: dict, direction: str, symbol: str) -> str:
+        """Formato antiguo de learning context — fallback para compatibilidad."""
         if not ctx or ctx.get("insufficient_data"):
             total = ctx.get("total_trades", 0) if ctx else 0
-            return f"Datos insuficientes para aprendizaje ({total} trades cerrados — mínimo 5 requeridos)"
+            return f"=== TU HISTORIAL RECIENTE ===\nDatos insuficientes ({total} trades cerrados — mínimo 5 requeridos)"
 
-        lines = []
+        lines = ["=== TU HISTORIAL RECIENTE ==="]
         total = ctx.get("total_trades", 0)
         g = ctx.get("general", {})
         gen_wr = round(g.get("wins", 0) / g["total"] * 100) if g.get("total") else 0
@@ -253,17 +269,7 @@ Responde solo con el JSON."""
             trend_wr = round(t.get("wins", 0) / t["total"] * 100)
             lines.append(f"En tendencia 1D similar: {t.get('wins', 0)}/{t['total']} ganados ({trend_wr}%)")
             if trend_wr < 30 and t["total"] >= 3:
-                lines.append("⚠️ ADVERTENCIA: Historial muy negativo en estas condiciones — considera no operar o reducir tamaño al mínimo")
-
-        v = ctx.get("by_volume")
-        if v and v.get("total"):
-            vol_wr = round(v.get("wins", 0) / v["total"] * 100)
-            lines.append(f"Con volumen {v['bucket']}: {v.get('wins', 0)}/{v['total']} ganados ({vol_wr}%)")
-
-        s = ctx.get("by_score")
-        if s and s.get("total"):
-            score_wr = round(s.get("wins", 0) / s["total"] * 100)
-            lines.append(f"Con score {s['range']}/100: {s.get('wins', 0)}/{s['total']} ganados ({score_wr}%)")
+                lines.append("⚠️ ADVERTENCIA: Historial muy negativo en estas condiciones")
 
         recent = ctx.get("recent_same_symbol", [])
         if recent:
@@ -271,7 +277,7 @@ Responde solo con el JSON."""
             for t in recent:
                 pnl = t.get("pnl_usd", 0) or 0
                 emoji = "✅" if pnl > 0 else "❌"
-                lines.append(f"  {emoji} {t.get('direction','').upper()} | P&L: ${pnl:.2f} | Razón: {t.get('close_reason','?')} | Tendencia 1D: {t.get('trend_1d','?')}")
+                lines.append(f"  {emoji} {t.get('direction','').upper()} | P&L: ${pnl:.2f} | Razón: {t.get('close_reason','?')}")
 
         return "\n".join(lines)
 
@@ -279,8 +285,6 @@ Responde solo con el JSON."""
         patterns = getattr(indicators, 'candlestick_patterns', None) or []
         if not patterns:
             return "Sin patrones significativos detectados"
-        # Los patrones ya vienen con descripción del bias — ej: "Hammer (bullish)"
-        # Solo formateamos con bullet y emoji de dirección
         lines = []
         for p in patterns:
             p_lower = p.lower()
@@ -295,8 +299,7 @@ Responde solo con el JSON."""
     def _format_rss_headlines(self, headlines: list, symbol: str) -> str:
         if not headlines:
             return "Sin noticias recientes encontradas"
-        lines = [f"• {h}" for h in headlines[:5]]
-        return "\n".join(lines)
+        return "\n".join(f"• {h}" for h in headlines[:5])
 
     def _format_coingecko_sentiment(self, sentiment: dict, symbol: str) -> str:
         if not sentiment:
@@ -310,7 +313,6 @@ Responde solo con el JSON."""
     def _format_whale_alerts(self, snapshot: CollectedSnapshot) -> str:
         if not snapshot.whale_alerts:
             return "Sin alertas de ballenas en las últimas 4 horas"
-
         lines = []
         for alert in snapshot.whale_alerts[:3]:
             signal_type = ""
@@ -318,10 +320,8 @@ Responde solo con el JSON."""
                 signal_type = "⚠️ BAJISTA — posible venta próxima"
             elif alert.is_bullish_signal:
                 signal_type = "✅ ALCISTA — posible acumulación"
-
             lines.append(
                 f"  {alert.symbol}: ${alert.amount_usd/1e6:.1f}M USD "
                 f"— {alert.transaction_type} {signal_type}"
             )
-
         return "\n".join(lines)

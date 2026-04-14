@@ -1,5 +1,6 @@
 """
 main.py — Loop principal del agente de trading
+v0.7.0 — Integra MTFAligner, LearningEngine, y RegimeDetector.
 """
 
 import asyncio
@@ -26,10 +27,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from collector import DataCollector
 from analyzer import TechnicalAnalyzer
 from analyzer.analyzer import TradingSignal
+from analyzer.mtf_alignment import MTFAligner
+from analyzer.learning import LearningEngine
 from brain import ClaudeBrain
 from executor import TradingExecutor
 from executor.position_monitor import PositionMonitor
 from database import TradingDatabase, TradeRecord, SignalRecord
+
+import pandas as pd
 
 LOOP_INTERVAL_MIN = int(os.getenv("LOOP_INTERVAL_MIN", "5"))
 DAILY_REPORT_TZ   = os.getenv("DAILY_REPORT_TIMEZONE", "America/Mexico_City")
@@ -45,12 +50,20 @@ class TradingAgent:
         self.db        = TradingDatabase()
         self.scheduler = AsyncIOScheduler(timezone=DAILY_REPORT_TZ)
         self.running   = False
-        logger.info("TradingAgent inicializado")
+
+        # v0.7.0 — nuevos componentes
+        self.mtf_aligner = MTFAligner()
+        self.learning_engine = None  # Se inicializa después de DB
+
+        logger.info("TradingAgent v0.7.0 inicializado")
 
     async def initialize(self):
         logger.info("Inicializando agente...")
         self.db.initialize()
         await self.collector.initialize()
+
+        # v0.7.0 — inicializar learning engine con referencia a DB
+        self.learning_engine = LearningEngine(self.db)
 
         testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
         self.executor = TradingExecutor(
@@ -58,7 +71,6 @@ class TradingAgent:
             testnet=testnet
         )
 
-        # ── Position Monitor ──────────────────────────────────────────────
         self.monitor = PositionMonitor(
             exchange=self.collector.binance.exchange,
             order_executor=self.executor.order_executor,
@@ -66,7 +78,6 @@ class TradingAgent:
             trading_executor=self.executor,
             db=self.db,
         )
-        # ──────────────────────────────────────────────────────────────────
 
         for hour in [0, 6, 12, 18]:
             self.scheduler.add_job(
@@ -75,11 +86,8 @@ class TradingAgent:
                 id=f"report_{hour:02d}h"
             )
 
-        # ── Cargar posiciones abiertas de DB al iniciar ──────────────────
-        # Pasar referencia de DB al executor para el reporte periódico
         self.executor.db = self.db
         await self._restore_tracked_positions()
-        # ──────────────────────────────────────────────────────────────────
 
         self.scheduler.start()
         logger.info(
@@ -92,9 +100,7 @@ class TradingAgent:
         logger.info(f"─── Inicio de ciclo: {cycle_start.strftime('%H:%M:%S')} ───")
 
         try:
-            # ── 1. Monitorear posiciones abiertas primero ─────────────────
             await self.monitor.run()
-            # ─────────────────────────────────────────────────────────────
 
             balance = await self.executor.check_balance()
             if balance is None:
@@ -103,16 +109,15 @@ class TradingAgent:
 
             logger.info(f"Saldo: {balance.summary}")
 
-            # Sincronizar con Binance — contar posiciones reales abiertas
             max_trades = int(os.getenv("MAX_OPEN_TRADES", "3"))
             try:
-                positions    = await self.collector.binance.exchange.fetch_positions()
-                open_trades  = sum(
+                positions = await self.collector.binance.exchange.fetch_positions()
+                open_trades = sum(
                     1 for p in positions
                     if p.get("contracts") and float(p["contracts"]) > 0
                 )
             except Exception:
-                open_trades = self.db.get_open_trades_count()  # fallback a DB
+                open_trades = self.db.get_open_trades_count()
 
             if open_trades >= max_trades:
                 logger.info(f"Máximo de operaciones alcanzado: {open_trades}/{max_trades} (Binance)")
@@ -125,16 +130,16 @@ class TradingAgent:
 
             analysis = self.analyzer.analyze(snapshot)
 
-            for signal in analysis.signals:
+            for sig in analysis.signals:
                 self.db.record_signal(SignalRecord(
-                    id=None, symbol=signal.symbol,
-                    direction=signal.direction, score=signal.score,
+                    id=None, symbol=sig.symbol,
+                    direction=sig.direction, score=sig.score,
                     was_traded=False, reason_not_traded=None,
                     detected_at=datetime.now(),
-                    rsi=signal.indicators_1h.rsi.value,
-                    macd_signal=signal.indicators_1h.macd.signal,
-                    volume_ratio=signal.indicators_1h.volume.ratio,
-                    trend=signal.indicators_1h.trend
+                    rsi=sig.indicators_1h.rsi.value,
+                    macd_signal=sig.indicators_1h.macd.signal,
+                    volume_ratio=sig.indicators_1h.volume.ratio,
+                    trend=sig.indicators_1h.trend
                 ))
 
             if not analysis.has_signals:
@@ -143,29 +148,26 @@ class TradingAgent:
 
             logger.info(f"{len(analysis.signals)} señal(es) detectada(s)")
 
-            # Obtener pares ya abiertos en Binance (evitar duplicados)
             try:
                 raw_pos = await self.collector.binance.exchange.fetch_positions()
                 open_symbols_binance = set()
                 for p in raw_pos:
                     if p.get("contracts") and float(p["contracts"]) > 0:
-                        # Normalizar símbolo: XRP/USDT:USDT -> XRPUSDT
                         sym = p["symbol"]
                         base = sym.split("/")[0] if "/" in sym else sym
                         open_symbols_binance.add(base + "USDT")
             except Exception:
                 open_symbols_binance = set()
 
-            for signal in analysis.signals[:3]:
-                open_count = open_trades  # usar conteo de Binance
+            for sig in analysis.signals[:3]:
+                open_count = open_trades
                 if open_count >= max_trades:
                     break
-                # Saltar si ya hay posición abierta de este par en Binance
-                if signal.symbol in open_symbols_binance:
-                    logger.info(f"Saltando {signal.symbol} — ya hay posición abierta en Binance")
+                if sig.symbol in open_symbols_binance:
+                    logger.info(f"Saltando {sig.symbol} — ya hay posición abierta en Binance")
                     continue
-                await self.process_signal(signal, balance, snapshot)
-                open_trades += 1  # actualizar conteo local
+                await self.process_signal(sig, balance, snapshot)
+                open_trades += 1
 
         except Exception as e:
             logger.error(f"Error en ciclo de trading: {e}")
@@ -182,7 +184,7 @@ class TradingAgent:
             f"(score: {signal.score:.0f})"
         )
 
-        # Obtener sentimiento de CoinGecko y noticias RSS condicionalmente
+        # Sentimiento y noticias
         coingecko_sentiment = None
         rss_headlines = []
         try:
@@ -194,25 +196,49 @@ class TradingAgent:
         except Exception as e:
             logger.warning(f"RSS no disponible para {signal.symbol}: {e}")
 
-        # Consultar historial de aprendizaje desde BD
+        # ─── v0.7.0: MTF Alignment ──────────────────────────────────────
+        mtf_alignment = None
+        try:
+            candles_by_tf = self._get_candles_by_timeframe(signal, snapshot)
+            if candles_by_tf:
+                mtf_alignment = self.mtf_aligner.analyze(candles_by_tf, signal.symbol)
+                logger.info(
+                    f"MTF {signal.symbol}: {mtf_alignment.consensus_direction} | "
+                    f"Aligned: {mtf_alignment.aligned} | "
+                    f"Pattern: {mtf_alignment.best_pattern.pattern_type if mtf_alignment.best_pattern else 'none'}"
+                )
+        except Exception as e:
+            logger.warning(f"MTF alignment no disponible para {signal.symbol}: {e}")
+
+        # ─── v0.7.0: Learning Context ───────────────────────────────────
         learning_context = None
         try:
-            ind_1d = getattr(signal, 'indicators_1d', None)
-            learning_context = self.db.get_learning_context(
-                symbol=signal.symbol,
-                direction=signal.direction,
-                trend_1d=ind_1d.trend if ind_1d else None,
-                volume_ratio=signal.indicators_1h.volume.ratio,
-                score=signal.score,
-            )
+            if self.learning_engine:
+                learning_context = self.learning_engine.get_context()
         except Exception as e:
-            logger.warning(f"No se pudo obtener contexto de aprendizaje: {e}")
+            logger.warning(f"Learning context no disponible: {e}")
+
+        # Si no hay learning_context nuevo, fallback al formato antiguo
+        if learning_context is None:
+            try:
+                ind_1d = getattr(signal, 'indicators_1d', None)
+                learning_context = self.db.get_learning_context(
+                    symbol=signal.symbol,
+                    direction=signal.direction,
+                    trend_1d=ind_1d.trend if ind_1d else None,
+                    volume_ratio=signal.indicators_1h.volume.ratio,
+                    score=signal.score,
+                )
+            except Exception as e:
+                logger.warning(f"Fallback learning context falló: {e}")
+        # ─── fin v0.7.0 ─────────────────────────────────────────────────
 
         decision = self.brain.decide(
             signal, snapshot, balance.operable,
             coingecko_sentiment=coingecko_sentiment,
             rss_headlines=rss_headlines,
             learning_context=learning_context,
+            mtf_alignment=mtf_alignment,
         )
         if not decision:
             logger.warning(f"Claude no pudo decidir para {signal.symbol}")
@@ -222,22 +248,46 @@ class TradingAgent:
             logger.info(f"Claude no opera {signal.symbol}: {decision.reason_not_trade}")
             return
 
-        # Pasar score al decision para mensajes de error informativos
         decision.score = signal.score
-
         result = await self.executor.execute_decision(decision, balance)
 
         if result and result.success:
-            # ── Registrar en DB primero para obtener trade_id ─────────────
-            # Extraer contexto de la señal para el pipeline de aprendizaje
-            ind_1h  = signal.indicators_1h
-            ind_1d  = getattr(signal, 'indicators_1d', None)
-            ind_1w  = getattr(signal, 'indicators_1w', None)
+            ind_1h = signal.indicators_1h
+            ind_1d = getattr(signal, 'indicators_1d', None)
+            ind_1w = getattr(signal, 'indicators_1w', None)
             patterns_list = getattr(ind_1h, 'candlestick_patterns', None) or []
             score_breakdown = (
                 f"EMA:{signal.score:.0f} Vol:{ind_1h.volume.ratio:.2f}x "
                 f"RSI:{ind_1h.rsi.value:.1f} MACD:{ind_1h.macd.signal}"
             )
+
+            # v0.7.0: extraer datos de chart pattern para BD
+            pattern_type = None
+            pattern_confidence = None
+            breakout_quality = None
+            breakout_score = None
+            regime = None
+            regime_adx = None
+            projected_rr = None
+            mtf_alignment_score = None
+            mtf_consensus = None
+            agent_stage = int(os.getenv("AGENT_STAGE", "1"))
+
+            if mtf_alignment:
+                mtf_alignment_score = mtf_alignment.alignment_score
+                mtf_consensus = mtf_alignment.consensus_direction
+                if mtf_alignment.best_pattern:
+                    pattern_type = mtf_alignment.best_pattern.pattern_type
+                    pattern_confidence = mtf_alignment.best_pattern.confidence
+                if mtf_alignment.best_breakout:
+                    breakout_quality = mtf_alignment.best_breakout.quality
+                    breakout_score = mtf_alignment.best_breakout.quality_score
+                if mtf_alignment.best_targets:
+                    projected_rr = mtf_alignment.best_targets.risk_reward
+                if mtf_alignment.regime:
+                    regime = mtf_alignment.regime.regime
+                    regime_adx = mtf_alignment.regime.adx
+
             trade_id = self.db.open_trade(TradeRecord(
                 id=None, symbol=decision.symbol,
                 direction=decision.direction,
@@ -266,11 +316,21 @@ class TradingAgent:
                 balance_reserve=balance.reserve,
                 balance_operable=balance.operable,
                 sl_tp_method="algo_api",
-                version="v0.6.0",
+                version="v0.7.0",
+                # v0.7.0 campos nuevos
+                pattern_type=pattern_type,
+                pattern_confidence=pattern_confidence,
+                breakout_quality=breakout_quality,
+                breakout_score=breakout_score,
+                regime=regime,
+                regime_adx=regime_adx,
+                projected_rr=projected_rr,
+                mtf_alignment_score=mtf_alignment_score,
+                mtf_consensus=mtf_consensus,
+                agent_stage=agent_stage,
             ))
             logger.info(f"Operación registrada en DB: ID {trade_id}")
 
-            # ── Registrar en monitor con trade_id correcto ────────────────
             self.monitor.register(
                 symbol=result.symbol,
                 direction=result.direction,
@@ -282,12 +342,46 @@ class TradingAgent:
                 trade_id=trade_id,
             )
 
+    def _get_candles_by_timeframe(self, signal: TradingSignal, snapshot) -> dict:
+        """
+        Construye un dict de DataFrames por timeframe desde el snapshot.
+        Usado por MTFAligner para detectar patrones en múltiples TFs.
+        """
+        candles_by_tf = {}
+
+        # Obtener velas del snapshot para este símbolo
+        symbol = signal.symbol
+        for tf_key in ["1h", "2h", "4h", "1d", "1w"]:
+            candles = None
+            try:
+                if hasattr(snapshot, 'candles') and snapshot.candles:
+                    candles = snapshot.candles.get(symbol, {}).get(tf_key)
+                elif hasattr(snapshot, 'get_candles'):
+                    candles = snapshot.get_candles(symbol, tf_key)
+            except Exception:
+                pass
+
+            if candles and len(candles) >= 30:
+                try:
+                    data = {
+                        "open": [c.open for c in candles],
+                        "high": [c.high for c in candles],
+                        "low": [c.low for c in candles],
+                        "close": [c.close for c in candles],
+                        "volume": [c.volume for c in candles],
+                    }
+                    df = pd.DataFrame(data)
+                    candles_by_tf[tf_key] = df
+                except Exception as e:
+                    logger.debug(f"Error convirtiendo velas {symbol}/{tf_key}: {e}")
+
+        return candles_by_tf
 
     async def _restore_tracked_positions(self):
         """
         Al iniciar, carga posiciones abiertas de DB y las registra en el monitor.
         Si una posición ya no está en Binance, la cierra en DB.
-        Si hay posiciones en Binance que no están en DB, las sincroniza automáticamente.
+        Si hay posiciones en Binance que no están en DB, las sincroniza.
         """
         try:
             raw_positions = await self.collector.binance.exchange.fetch_positions()
@@ -299,27 +393,23 @@ class TradingAgent:
                     binance_positions[symbol] = p
 
             open_in_binance = set(binance_positions.keys())
-
             open_trades = self.db.get_open_trades()
-            db_symbols  = {t["symbol"] for t in open_trades}
+            db_symbols = {t["symbol"] for t in open_trades}
 
-            # ── Sincronizar posiciones de Binance que no están en DB ──────────
             synced = 0
             for symbol, p in binance_positions.items():
                 if symbol not in db_symbols:
                     try:
                         entry_price = float(p.get("entryPrice") or p.get("entry_price") or 0)
-                        contracts   = float(p.get("contracts", 0) or 0)
-                        notional    = float(p.get("notional", 0) or 0)
-                        leverage    = float(p.get("leverage", 1) or 1)
-                        amount_usd  = abs(notional) / leverage if leverage > 0 else entry_price * contracts
-                        direction   = "long" if float(p.get("contracts", 0)) > 0 else "short"
+                        contracts = float(p.get("contracts", 0) or 0)
+                        notional = float(p.get("notional", 0) or 0)
+                        leverage = float(p.get("leverage", 1) or 1)
+                        amount_usd = abs(notional) / leverage if leverage > 0 else entry_price * contracts
+                        direction = "long" if float(p.get("contracts", 0)) > 0 else "short"
 
-                        # Consultar SL/TP desde órdenes condicionales (Algo API)
-                        stop_loss   = 0.0
+                        stop_loss = 0.0
                         take_profit = 0.0
                         try:
-                            raw_sym = symbol.replace("USDT", "")
                             algo_orders = await self.collector.binance.exchange.fapiPrivateGetOpenAlgoOrders(
                                 {"symbol": symbol}
                             )
@@ -329,16 +419,16 @@ class TradingAgent:
                                 order_type = str(o.get("type", "")).lower()
                                 side = str(o.get("side", "")).lower()
                                 if trigger > 0:
-                                    if "stop" in order_type or side == "sell" and trigger < entry_price:
+                                    if "stop" in order_type or (side == "sell" and trigger < entry_price):
                                         stop_loss = trigger
-                                    elif "take_profit" in order_type or side == "sell" and trigger > entry_price:
+                                    elif "take_profit" in order_type or (side == "sell" and trigger > entry_price):
                                         take_profit = trigger
                             if stop_loss > 0 or take_profit > 0:
-                                logger.info(f"SL/TP obtenidos desde Algo API para {symbol}: SL=${stop_loss} TP=${take_profit}")
+                                logger.info(f"SL/TP desde Algo API para {symbol}: SL=${stop_loss} TP=${take_profit}")
                         except Exception as e:
                             logger.warning(f"No se pudo obtener SL/TP para {symbol}: {e}")
 
-                        balance  = await self.executor.balance_checker.get_balance()
+                        bal = await self.executor.balance_checker.get_balance()
                         trade_id = self.db.open_trade(TradeRecord(
                             id=None, symbol=symbol,
                             direction=direction,
@@ -354,13 +444,12 @@ class TradingAgent:
                             opened_at=datetime.now(),
                             closed_at=None, exit_price=None,
                             pnl_usd=None, pnl_pct=None,
-                            close_reason=None,
-                            order_id=None,
-                            balance_total=balance.usdt_total if balance else 0,
-                            balance_reserve=balance.reserve if balance else 0,
-                            balance_operable=balance.operable if balance else 0,
+                            close_reason=None, order_id=None,
+                            balance_total=bal.usdt_total if bal else 0,
+                            balance_reserve=bal.reserve if bal else 0,
+                            balance_operable=bal.operable if bal else 0,
                             sl_tp_method="algo_api",
-                            version="v0.6.0",
+                            version="v0.7.0",
                         ))
                         open_trades.append({"id": trade_id, "symbol": symbol,
                                             "direction": direction,
@@ -372,7 +461,6 @@ class TradingAgent:
                         logger.info(f"Posición sincronizada desde Binance: {symbol} | DB ID={trade_id}")
                     except Exception as e:
                         logger.error(f"Error sincronizando {symbol} desde Binance: {e}")
-            # ──────────────────────────────────────────────────────────────────
 
             if not open_trades:
                 logger.info("No hay posiciones abiertas en DB para restaurar")
@@ -383,8 +471,8 @@ class TradingAgent:
                 symbol = trade["symbol"]
                 if symbol in open_in_binance:
                     entry_price = trade.get("entry_price", 0) or 0
-                    amount_usd  = trade.get("amount_usd", 0) or 0
-                    quantity    = amount_usd / entry_price if entry_price > 0 else 0
+                    amount_usd = trade.get("amount_usd", 0) or 0
+                    quantity = amount_usd / entry_price if entry_price > 0 else 0
                     self.monitor.register(
                         symbol=symbol,
                         direction=trade.get("direction", "long"),
@@ -399,7 +487,6 @@ class TradingAgent:
                     logger.info(f"Posición restaurada: {symbol} | DB ID={trade['id']}")
                 else:
                     logger.info(f"Posición {symbol} (ID {trade['id']}) no está en Binance — cerrando en DB")
-                    # Intentar obtener P&L real desde historial de Binance
                     exit_price = 0.0
                     pnl_usd = 0.0
                     pnl_pct = 0.0
@@ -428,8 +515,7 @@ class TradingAgent:
                     if pnl_usd != 0 and self.executor.notifications_enabled:
                         entry_p = trade.get("entry_price", 0) or 0
                         amount_usd = trade.get("amount_usd", 0) or 0
-                        import asyncio as _ai
-                        _ai.ensure_future(self.executor.notify_trade_closed(
+                        asyncio.ensure_future(self.executor.notify_trade_closed(
                             symbol=symbol,
                             direction=trade.get("direction", "long"),
                             pnl_usd=pnl_usd, pnl_pct=pnl_pct,
@@ -449,17 +535,16 @@ class TradingAgent:
         now = datetime.now().strftime("%H:%M")
         logger.info(f"Generando reporte periódico ({now})...")
         try:
-            balance         = await self.executor.check_balance()
+            balance = await self.executor.check_balance()
             current_balance = balance.usdt_free if balance else 0
-            today           = datetime.now().strftime("%Y-%m-%d")
-            summary         = self.db.get_daily_summary(today)
+            today = datetime.now().strftime("%Y-%m-%d")
+            summary = self.db.get_daily_summary(today)
             self.db.save_daily_summary(
                 date=today,
                 starting_balance=self.executor._daily_starting_balance or current_balance,
                 ending_balance=current_balance
             )
             open_positions = self.db.get_open_trades()
-            # Enriquecer con precio actual de Binance
             if open_positions:
                 try:
                     for pos in open_positions:
@@ -489,7 +574,7 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Error enviando mensaje de inicio: {e}")
 
-        logger.info(f"Agente corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
+        logger.info(f"Agente v0.7.0 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
         while self.running:
             await self.run_cycle()
             await asyncio.sleep(LOOP_INTERVAL_MIN * 60)
@@ -504,7 +589,7 @@ class TradingAgent:
 
 async def main():
     agent = TradingAgent()
-    loop  = asyncio.get_event_loop()
+    loop = asyncio.get_event_loop()
 
     def handle_shutdown():
         logger.info("Señal de cierre recibida")
