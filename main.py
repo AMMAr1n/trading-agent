@@ -284,22 +284,73 @@ class TradingAgent:
     async def _restore_tracked_positions(self):
         """
         Al iniciar, carga posiciones abiertas de DB y las registra en el monitor.
-        Si una posición ya no está en Binance, la cierra en DB automáticamente.
+        Si una posición ya no está en Binance, la cierra en DB.
+        Si hay posiciones en Binance que no están en DB, las sincroniza automáticamente.
         """
         try:
+            raw_positions = await self.collector.binance.exchange.fetch_positions()
+            binance_positions = {}
+            for p in raw_positions:
+                if p.get("contracts") and float(p["contracts"]) > 0:
+                    base = p["symbol"].split("/")[0] if "/" in p["symbol"] else p["symbol"].replace("USDT", "")
+                    symbol = base + "USDT"
+                    binance_positions[symbol] = p
+
+            open_in_binance = set(binance_positions.keys())
+
             open_trades = self.db.get_open_trades()
+            db_symbols  = {t["symbol"] for t in open_trades}
+
+            # ── Sincronizar posiciones de Binance que no están en DB ──────────
+            synced = 0
+            for symbol, p in binance_positions.items():
+                if symbol not in db_symbols:
+                    try:
+                        entry_price = float(p.get("entryPrice") or p.get("entry_price") or 0)
+                        contracts   = float(p.get("contracts", 0) or 0)
+                        notional    = float(p.get("notional", 0) or 0)
+                        leverage    = float(p.get("leverage", 1) or 1)
+                        amount_usd  = abs(notional) / leverage if leverage > 0 else entry_price * contracts
+                        direction   = "long" if float(p.get("contracts", 0)) > 0 else "short"
+                        balance     = await self.executor.balance_checker.get_balance()
+                        trade_id = self.db.open_trade(TradeRecord(
+                            id=None, symbol=symbol,
+                            direction=direction,
+                            trading_mode="futures",
+                            amount_usd=round(amount_usd, 2),
+                            entry_price=entry_price,
+                            stop_loss=0.0,
+                            take_profit=0.0,
+                            leverage=f"{int(leverage)}x",
+                            score=0.0,
+                            reasoning="Sincronizado desde Binance al iniciar",
+                            status="open",
+                            opened_at=datetime.now(),
+                            closed_at=None, exit_price=None,
+                            pnl_usd=None, pnl_pct=None,
+                            close_reason=None,
+                            order_id=None,
+                            balance_total=balance.usdt_total if balance else 0,
+                            balance_reserve=balance.reserve if balance else 0,
+                            balance_operable=balance.operable if balance else 0,
+                            sl_tp_method="algo_api",
+                            version="v0.6.0",
+                        ))
+                        open_trades.append({"id": trade_id, "symbol": symbol,
+                                            "direction": direction,
+                                            "entry_price": entry_price,
+                                            "amount_usd": amount_usd,
+                                            "stop_loss": 0.0,
+                                            "take_profit": 0.0})
+                        synced += 1
+                        logger.info(f"Posición sincronizada desde Binance: {symbol} | DB ID={trade_id}")
+                    except Exception as e:
+                        logger.error(f"Error sincronizando {symbol} desde Binance: {e}")
+            # ──────────────────────────────────────────────────────────────────
+
             if not open_trades:
                 logger.info("No hay posiciones abiertas en DB para restaurar")
                 return
-
-            raw_positions = await self.collector.binance.exchange.fetch_positions()
-            open_in_binance = set()
-            for p in raw_positions:
-                if p.get("contracts") and float(p["contracts"]) > 0:
-                    # Guardar tanto el símbolo ccxt como el símbolo limpio
-                    open_in_binance.add(p["symbol"])
-                    base = p["symbol"].split("/")[0] if "/" in p["symbol"] else p["symbol"].replace("USDT", "")
-                    open_in_binance.add(base + "USDT")
 
             restored = 0
             for trade in open_trades:
@@ -322,13 +373,48 @@ class TradingAgent:
                     logger.info(f"Posición restaurada: {symbol} | DB ID={trade['id']}")
                 else:
                     logger.info(f"Posición {symbol} (ID {trade['id']}) no está en Binance — cerrando en DB")
+                    # Intentar obtener P&L real desde historial de Binance
+                    exit_price = 0.0
+                    pnl_usd = 0.0
+                    pnl_pct = 0.0
+                    try:
+                        raw_sym = symbol.replace("USDT", "/USDT:USDT")
+                        trades_history = await self.collector.binance.exchange.fetch_my_trades(
+                            raw_sym, limit=5
+                        )
+                        if trades_history:
+                            last_trade = trades_history[-1]
+                            exit_price = float(last_trade.get("price", 0) or 0)
+                            entry_p = trade.get("entry_price", 0) or 0
+                            qty = trade.get("amount_usd", 0) / entry_p if entry_p > 0 else 0
+                            direction = trade.get("direction", "long")
+                            if exit_price > 0 and entry_p > 0 and qty > 0:
+                                diff = (exit_price - entry_p) if direction == "long" else (entry_p - exit_price)
+                                pnl_usd = round(diff * qty, 2)
+                                pnl_pct = round((diff / entry_p) * 100, 2)
+                    except Exception as e:
+                        logger.warning(f"No se pudo obtener P&L real para {symbol}: {e}")
                     self.db.close_trade(
                         trade_id=trade["id"],
-                        exit_price=0, pnl_usd=0, pnl_pct=0,
-                        close_reason="no_encontrada_al_reiniciar"
+                        exit_price=exit_price, pnl_usd=pnl_usd, pnl_pct=pnl_pct,
+                        close_reason="cerrada_por_binance"
                     )
+                    if pnl_usd != 0 and self.executor.notifications_enabled:
+                        entry_p = trade.get("entry_price", 0) or 0
+                        amount_usd = trade.get("amount_usd", 0) or 0
+                        import asyncio as _ai
+                        _ai.ensure_future(self.executor.notify_trade_closed(
+                            symbol=symbol,
+                            direction=trade.get("direction", "long"),
+                            pnl_usd=pnl_usd, pnl_pct=pnl_pct,
+                            duration_min=0,
+                            close_reason="cerrada_por_binance",
+                            amount_usd=amount_usd,
+                            entry_price=entry_p,
+                            exit_price=exit_price,
+                        ))
 
-            logger.info(f"Posiciones restauradas: {restored}/{len(open_trades)}")
+            logger.info(f"Sincronizadas: {synced} | Restauradas: {restored}/{len(open_trades)}")
 
         except Exception as e:
             logger.error(f"Error restaurando posiciones: {e}")
