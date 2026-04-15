@@ -1,6 +1,8 @@
 """
 patterns.py — Detector de formaciones chartistas (chart patterns)
-v0.7.1 — 16 patrones: 10 originales + 6 nuevos de alta probabilidad.
+v0.7.2 — 16 patrones + filtro SMA50 de confianza.
+Basado en Charles University thesis (2025): SMA50 como filtro de tendencia
+validado estadísticamente en crypto markets.
 
 REVERSAL (8):
   - Double Top / Double Bottom
@@ -109,6 +111,32 @@ class PatternDetector:
                 (n * np.sum(x_norm ** 2) - np.sum(x_norm) ** 2 + 1e-10)
         avg_price = np.mean(y)
         return float(slope / avg_price * 100) if avg_price > 0 else 0.0
+
+    def _apply_sma50_filter(self, pattern, df):
+        """
+        v0.7.2: Ajusta confianza del patrón según SMA50.
+        Patrón bullish + precio > SMA50 → +5% confianza (alineado con tendencia)
+        Patrón bullish + precio < SMA50 → -15% confianza (contra tendencia)
+        Patrón bearish + precio < SMA50 → +5% confianza
+        Patrón bearish + precio > SMA50 → -15% confianza
+        """
+        if pattern is None or len(df) < 50:
+            return pattern
+        sma50 = df["close"].rolling(window=50).mean().iloc[-1]
+        if np.isnan(sma50):
+            return pattern
+        price = pattern.current_price
+        if pattern.direction == "bullish":
+            if price > sma50:
+                pattern.confidence = min(pattern.confidence + 5, 98)
+            else:
+                pattern.confidence = max(pattern.confidence - 15, 10)
+        elif pattern.direction == "bearish":
+            if price < sma50:
+                pattern.confidence = min(pattern.confidence + 5, 98)
+            else:
+                pattern.confidence = max(pattern.confidence - 15, 10)
+        return pattern
 
     # ─── REVERSAL PATTERNS ─────────────────────────────────────────────
 
@@ -759,7 +787,9 @@ class PatternDetector:
             try:
                 result = detector(df, symbol, timeframe)
                 if result and result.confidence >= 40:
-                    patterns.append(result)
+                    result = self._apply_sma50_filter(result, df)
+                    if result.confidence >= 30:
+                        patterns.append(result)
             except Exception as e:
                 logger.debug(f"Error en {detector.__name__} para {symbol}/{timeframe}: {e}")
 
@@ -767,7 +797,9 @@ class PatternDetector:
         try:
             result = self._detect_converging_pattern(df, symbol, timeframe)
             if result and result.confidence >= 40:
-                patterns.append(result)
+                result = self._apply_sma50_filter(result, df)
+                if result.confidence >= 30:
+                    patterns.append(result)
         except Exception as e:
             logger.debug(f"Error en converging pattern para {symbol}/{timeframe}: {e}")
 

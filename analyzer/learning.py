@@ -1,26 +1,32 @@
 """
 learning.py — Motor de aprendizaje del agente
-Reemplaza get_learning_context() con un sistema analítico completo.
+v0.7.2 — Añade skewness-adjusted t-test para priorizar patrones
+con significancia estadística real vs patrones que ganaron por suerte.
 
-Funciones principales:
-1. Trade quality scoring (R:R real, MAE/MFE, eficiencia)
-2. Pattern performance tracking (win rate por patrón + régimen)
-3. Bias detection (overtrading, sesgo long, horas malas)
-4. Progressive stage management (aprendiz → experto)
-5. Adaptive rule generation para el prompt de Claude
+Fórmula del t-test ajustado (Johnson, 1978):
+  t_sa = sqrt(m) * (s + (1/3)*gamma*s^2 + (1/6m)*gamma)
+  donde s = r_bar / sigma_r (media estandarizada)
+        gamma = skewness de los retornos
+        m = número de trades
 
-v0.7.0
+Si p-value < 0.05 → "estadísticamente validado"
+Si p-value >= 0.05 → "observado, no validado"
+
+Esto se usa para priorizar, no para descartar.
 """
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import numpy as np
+from scipy import stats as scipy_stats
+
 logger = logging.getLogger(__name__)
 
-# Etapas de evolución
 STAGES = {
     1: {"name": "Aprendiz",     "min_trades": 0,   "max_leverage": "1x",  "min_score": 50,  "min_rr": 2.0},
     2: {"name": "Practicante",  "min_trades": 20,  "max_leverage": "2x",  "min_score": 45,  "min_rr": 1.8},
@@ -28,14 +34,12 @@ STAGES = {
     4: {"name": "Experto",      "min_trades": 100, "max_leverage": "5x",  "min_score": 40,  "min_rr": 1.3},
 }
 
-# Criterios de avance
 ADVANCE_CRITERIA = {
     2: {"min_wr": 50, "min_pf": 1.2, "min_trades": 20},
     3: {"min_wr": 55, "min_pf": 1.5, "min_trades": 50},
     4: {"min_wr": 55, "min_pf": 1.8, "min_trades": 100},
 }
 
-# Criterios de retroceso
 RETREAT_CRITERIA = {
     "max_drawdown_pct": 15,
     "min_wr_last_20": 40,
@@ -44,20 +48,18 @@ RETREAT_CRITERIA = {
 
 @dataclass
 class TradeQuality:
-    """Calidad de un trade individual."""
     trade_id: int
-    quality_score: float          # 0-100
-    projected_rr: float           # R:R al abrir
-    actual_rr: float              # R:R real al cerrar
-    efficiency: float             # % del TP alcanzado (0-1+)
-    mae_pct: float                # Max Adverse Excursion (% peor momento)
-    mfe_pct: float                # Max Favorable Excursion (% mejor momento)
-    pattern_correct: bool         # ¿El patrón acertó la dirección?
+    quality_score: float
+    projected_rr: float
+    actual_rr: float
+    efficiency: float
+    mae_pct: float
+    mfe_pct: float
+    pattern_correct: bool
 
 
 @dataclass
 class PatternStats:
-    """Estadísticas de rendimiento de un tipo de patrón."""
     pattern_type: str
     total_trades: int
     wins: int
@@ -65,58 +67,46 @@ class PatternStats:
     win_rate: float
     avg_rr: float
     avg_quality: float
-    profit_factor: float          # ganancias / pérdidas
-    best_regime: str              # Régimen donde mejor funciona
-    worst_regime: str             # Régimen donde peor funciona
+    profit_factor: float
+    best_regime: str
+    worst_regime: str
+    # v0.7.2: significancia estadística
+    is_statistically_validated: bool = False
+    t_stat: float = 0.0
+    p_value: float = 1.0
+    priority_label: str = "observado"  # "validado" | "observado" | "insuficiente"
 
 
 @dataclass
 class AgentBias:
-    """Sesgo detectado en el comportamiento del agente."""
-    bias_type: str                # "long_bias", "overtrading", "bad_hours", etc.
-    severity: str                 # "low" | "medium" | "high"
+    bias_type: str
+    severity: str
     description: str
     recommendation: str
 
 
 @dataclass
 class LearningContext:
-    """
-    Contexto de aprendizaje completo para el prompt de Claude.
-    Reemplaza la sección simple de historial.
-    """
     stage: int
     stage_name: str
     stage_config: dict
-
-    # Stats globales
     total_trades_closed: int
     win_rate: float
     profit_factor: float
     avg_rr: float
     total_pnl: float
-
-    # Análisis por patrón
     pattern_stats: list[PatternStats]
-    best_patterns: list[str]         # Top 3 patrones por win rate
-    worst_patterns: list[str]        # Bottom 3 patrones
-    patterns_to_avoid: list[str]     # WR < 40%
-
-    # Sesgos
+    best_patterns: list[str]
+    worst_patterns: list[str]
+    patterns_to_avoid: list[str]
     biases: list[AgentBias]
-
-    # Reglas adaptativas
     adaptive_rules: list[str]
-
-    # Estado de evolución
-    next_stage_progress: str         # "15/20 trades para Practicante"
+    next_stage_progress: str
     can_advance: bool
     should_retreat: bool
 
     def prompt_section(self) -> str:
-        """Genera la sección completa de aprendizaje para el prompt."""
         lines = []
-
         lines.append(f"=== TU EXPERIENCIA COMO TRADER (Etapa: {self.stage_name}) ===")
         lines.append(
             f"Trades cerrados: {self.total_trades_closed} | "
@@ -127,7 +117,6 @@ class LearningContext:
         lines.append(f"Progreso: {self.next_stage_progress}")
         lines.append("")
 
-        # Parámetros de la etapa actual
         cfg = self.stage_config
         lines.append(f"Parámetros de tu etapa:")
         lines.append(
@@ -137,18 +126,36 @@ class LearningContext:
         )
         lines.append("")
 
-        # Patrones que funcionan
+        # Patrones validados estadísticamente (PRIORIDAD MÁXIMA)
+        validated = [ps for ps in self.pattern_stats
+                     if ps.is_statistically_validated and ps.total_trades >= 3]
+        if validated:
+            lines.append("Patrones VALIDADOS estadísticamente (priorizar):")
+            for ps in validated:
+                lines.append(
+                    f"  ⭐ {ps.pattern_type.replace('_', ' ').title()}: "
+                    f"{ps.win_rate:.0f}% WR ({ps.wins}/{ps.total_trades}) | "
+                    f"PF: {ps.profit_factor:.1f}x | "
+                    f"p-value: {ps.p_value:.3f} | "
+                    f"Mejor en: {ps.best_regime}"
+                )
+            lines.append("")
+
+        # Patrones observados (funcionan pero sin validación estadística)
         if self.best_patterns:
-            lines.append("Patrones que te funcionan:")
-            for ps in self.pattern_stats:
-                if ps.pattern_type in self.best_patterns and ps.total_trades >= 3:
+            observed_good = [ps for ps in self.pattern_stats
+                            if ps.pattern_type in self.best_patterns
+                            and not ps.is_statistically_validated
+                            and ps.total_trades >= 3]
+            if observed_good:
+                lines.append("Patrones que funcionan (observados, sin validación estadística):")
+                for ps in observed_good:
                     lines.append(
                         f"  ✅ {ps.pattern_type.replace('_', ' ').title()}: "
                         f"{ps.win_rate:.0f}% WR ({ps.wins}/{ps.total_trades}) | "
-                        f"PF: {ps.profit_factor:.1f}x | "
-                        f"Mejor en: {ps.best_regime}"
+                        f"PF: {ps.profit_factor:.1f}x"
                     )
-            lines.append("")
+                lines.append("")
 
         # Patrones a evitar
         if self.patterns_to_avoid:
@@ -161,7 +168,6 @@ class LearningContext:
                     )
             lines.append("")
 
-        # Sesgos
         if self.biases:
             lines.append("Sesgos detectados:")
             for bias in self.biases:
@@ -169,7 +175,6 @@ class LearningContext:
                 lines.append(f"     → {bias.recommendation}")
             lines.append("")
 
-        # Reglas adaptativas
         if self.adaptive_rules:
             lines.append("Reglas adaptativas (generadas de tu historial):")
             for rule in self.adaptive_rules:
@@ -179,29 +184,12 @@ class LearningContext:
 
 
 class LearningEngine:
-    """
-    Motor de aprendizaje del agente.
-
-    Consulta la BD de trades, calcula estadísticas,
-    detecta sesgos, y genera contexto para el prompt.
-
-    Usage:
-        engine = LearningEngine(db)
-        context = engine.get_context()
-    """
 
     def __init__(self, db):
-        """
-        Args:
-            db: Instancia de TradingDatabase con métodos:
-                - get_closed_trades(limit) → list[dict]
-                - get_performance_stats(days) → dict
-        """
         self.db = db
         self.current_stage = int(os.getenv("AGENT_STAGE", "1"))
 
-    def _get_closed_trades(self, limit: int = 200) -> list[dict]:
-        """Obtiene trades cerrados de la BD."""
+    def _get_closed_trades(self, limit=200):
         try:
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
@@ -217,8 +205,36 @@ class LearningEngine:
             logger.error(f"Error obteniendo trades cerrados: {e}")
             return []
 
-    def _calculate_pattern_stats(self, trades: list[dict]) -> list[PatternStats]:
-        """Calcula estadísticas por tipo de patrón."""
+    def _skewness_adjusted_ttest(self, returns: list) -> tuple:
+        """
+        Calcula el t-test ajustado por asimetría (Johnson, 1978).
+        Usado por la tesis de Charles University para evaluar patrones en crypto.
+
+        Returns: (t_statistic, p_value)
+        """
+        m = len(returns)
+        if m < 5:
+            return 0.0, 1.0
+
+        r = np.array(returns, dtype=float)
+        r_bar = np.mean(r)
+        sigma_r = np.std(r, ddof=1)
+
+        if sigma_r == 0:
+            return 0.0, 1.0
+
+        s = r_bar / sigma_r  # media estandarizada
+        gamma = np.mean((r - r_bar) ** 3) / (sigma_r ** 3)  # skewness
+
+        # t_sa = sqrt(m) * (s + (1/3)*gamma*s^2 + (1/(6*m))*gamma)
+        t_sa = math.sqrt(m) * (s + (1/3) * gamma * s**2 + (1/(6*m)) * gamma)
+
+        # p-value bilateral usando distribución t con m-1 grados de libertad
+        p_value = 2 * (1 - scipy_stats.t.cdf(abs(t_sa), df=m-1))
+
+        return float(t_sa), float(p_value)
+
+    def _calculate_pattern_stats(self, trades):
         pattern_groups = {}
         for t in trades:
             pt = t.get("pattern_type", "unknown") or "unknown"
@@ -234,7 +250,6 @@ class LearningEngine:
             total_loss = abs(sum(t.get("pnl_usd", 0) for t in group if (t.get("pnl_usd") or 0) < 0))
             pf = total_gain / total_loss if total_loss > 0 else (2.0 if total_gain > 0 else 0)
 
-            # Mejor/peor régimen
             regime_wr = {}
             for t in group:
                 regime = t.get("regime", "unknown") or "unknown"
@@ -254,6 +269,18 @@ class LearningEngine:
             avg_rr_list = [t.get("actual_rr", 0) for t in group if t.get("actual_rr")]
             avg_rr = sum(avg_rr_list) / len(avg_rr_list) if avg_rr_list else 0
 
+            # v0.7.2: Skewness-adjusted t-test para significancia
+            returns = [t.get("pnl_pct", 0) or 0 for t in group]
+            t_stat, p_value = self._skewness_adjusted_ttest(returns)
+            is_validated = p_value < 0.05 and len(group) >= 5 and wins / len(group) > 0.5
+
+            if len(group) < 5:
+                priority_label = "insuficiente"
+            elif is_validated:
+                priority_label = "validado"
+            else:
+                priority_label = "observado"
+
             stats.append(PatternStats(
                 pattern_type=pt,
                 total_trades=len(group),
@@ -261,42 +288,41 @@ class LearningEngine:
                 losses=losses,
                 win_rate=round(wins / len(group) * 100, 1) if group else 0,
                 avg_rr=round(avg_rr, 2),
-                avg_quality=0,  # Se calcula después
+                avg_quality=0,
                 profit_factor=round(pf, 2),
                 best_regime=best_regime,
                 worst_regime=worst_regime,
+                is_statistically_validated=is_validated,
+                t_stat=round(t_stat, 3),
+                p_value=round(p_value, 4),
+                priority_label=priority_label,
             ))
 
-        stats.sort(key=lambda s: s.win_rate, reverse=True)
+        stats.sort(key=lambda s: (s.is_statistically_validated, s.win_rate), reverse=True)
         return stats
 
-    def _detect_biases(self, trades: list[dict]) -> list[AgentBias]:
-        """Detecta sesgos sistemáticos en el comportamiento del agente."""
+    def _detect_biases(self, trades):
         biases = []
         if not trades:
             return biases
 
-        # Sesgo de dirección
         longs = sum(1 for t in trades if t.get("direction") == "long")
         shorts = len(trades) - longs
         if longs > 0 and shorts > 0:
             long_pct = longs / len(trades) * 100
             if long_pct > 75:
                 biases.append(AgentBias(
-                    bias_type="long_bias",
-                    severity="medium",
+                    bias_type="long_bias", severity="medium",
                     description=f"Sesgo LONG: {long_pct:.0f}% de trades son LONG",
-                    recommendation="Buscar activamente oportunidades SHORT cuando los indicadores lo sugieran"
+                    recommendation="Buscar activamente oportunidades SHORT"
                 ))
             elif long_pct < 25:
                 biases.append(AgentBias(
-                    bias_type="short_bias",
-                    severity="medium",
+                    bias_type="short_bias", severity="medium",
                     description=f"Sesgo SHORT: {100-long_pct:.0f}% de trades son SHORT",
                     recommendation="Considerar más setups LONG en tendencias alcistas"
                 ))
 
-        # Horas malas
         hour_stats = {}
         for t in trades:
             hour = t.get("hour_opened")
@@ -307,19 +333,15 @@ class LearningEngine:
                 if (t.get("pnl_usd") or 0) > 0:
                     hour_stats[hour]["wins"] += 1
 
-        bad_hours = [
-            h for h, s in hour_stats.items()
-            if s["total"] >= 3 and s["wins"] / s["total"] < 0.3
-        ]
+        bad_hours = [h for h, s in hour_stats.items()
+                     if s["total"] >= 3 and s["wins"] / s["total"] < 0.3]
         if bad_hours:
             biases.append(AgentBias(
-                bias_type="bad_hours",
-                severity="low",
+                bias_type="bad_hours", severity="low",
                 description=f"Horas con bajo rendimiento (UTC): {bad_hours}",
                 recommendation=f"Evitar operar entre {min(bad_hours)}-{max(bad_hours)} UTC"
             ))
 
-        # Overtrading (más de 5 trades en un día con WR bajo)
         day_counts = {}
         for t in trades:
             day = str(t.get("opened_at", ""))[:10]
@@ -330,31 +352,33 @@ class LearningEngine:
                 if (t.get("pnl_usd") or 0) > 0:
                     day_counts[day]["wins"] += 1
 
-        overtrading_days = [
-            d for d, s in day_counts.items()
-            if s["total"] >= 5 and s["wins"] / s["total"] < 0.4
-        ]
+        overtrading_days = [d for d, s in day_counts.items()
+                           if s["total"] >= 5 and s["wins"] / s["total"] < 0.4]
         if overtrading_days:
             biases.append(AgentBias(
-                bias_type="overtrading",
-                severity="high",
+                bias_type="overtrading", severity="high",
                 description=f"Overtrading detectado en {len(overtrading_days)} día(s) con WR < 40%",
                 recommendation="Limitar a máximo 4 trades por día. Calidad sobre cantidad."
             ))
 
         return biases
 
-    def _generate_adaptive_rules(self, trades: list[dict], pattern_stats: list[PatternStats],
-                                  biases: list[AgentBias]) -> list[str]:
-        """Genera reglas adaptativas basadas en el historial."""
+    def _generate_adaptive_rules(self, trades, pattern_stats, biases):
         rules = []
 
-        # Reglas por patrón
+        # Reglas por patrón con priorización estadística
         for ps in pattern_stats:
-            if ps.total_trades >= 5 and ps.win_rate >= 70:
+            if ps.is_statistically_validated and ps.win_rate >= 60:
                 rules.append(
-                    f"Priorizar {ps.pattern_type.replace('_', ' ')} — "
-                    f"históricamente {ps.win_rate:.0f}% WR con {ps.total_trades} trades"
+                    f"PRIORIZAR {ps.pattern_type.replace('_', ' ')} — "
+                    f"validado estadísticamente: {ps.win_rate:.0f}% WR, "
+                    f"p-value {ps.p_value:.3f}, {ps.total_trades} trades"
+                )
+            elif ps.total_trades >= 5 and ps.win_rate >= 70 and not ps.is_statistically_validated:
+                rules.append(
+                    f"Considerar {ps.pattern_type.replace('_', ' ')} — "
+                    f"{ps.win_rate:.0f}% WR pero aún no validado estadísticamente "
+                    f"(p-value: {ps.p_value:.3f}). Operar con tamaño reducido."
                 )
             elif ps.total_trades >= 5 and ps.win_rate < 35:
                 rules.append(
@@ -362,25 +386,23 @@ class LearningEngine:
                     f"solo {ps.win_rate:.0f}% WR. No entrar aunque el score sea alto."
                 )
 
-        # Reglas por win rate general
         if trades:
             recent_20 = trades[:20]
             recent_wr = sum(1 for t in recent_20 if (t.get("pnl_usd") or 0) > 0) / len(recent_20) * 100
             if recent_wr < 40:
                 rules.append(
                     f"PRECAUCIÓN: Win rate reciente {recent_wr:.0f}% (últimos {len(recent_20)} trades). "
-                    f"Ser más selectivo, subir MIN_SCORE."
+                    f"Ser más selectivo."
                 )
             elif recent_wr > 65:
                 rules.append(
                     f"Buen momento: Win rate reciente {recent_wr:.0f}%. "
-                    f"Mantener la disciplina, no aumentar riesgo."
+                    f"Mantener la disciplina."
                 )
 
-        return rules[:6]  # Máximo 6 reglas
+        return rules[:6]
 
-    def _evaluate_stage(self, trades: list[dict]) -> tuple:
-        """Evalúa si el agente debe avanzar o retroceder de etapa."""
+    def _evaluate_stage(self, trades):
         can_advance = False
         should_retreat = False
         progress = ""
@@ -395,11 +417,7 @@ class LearningEngine:
         next_stage = self.current_stage + 1
         if next_stage in ADVANCE_CRITERIA:
             criteria = ADVANCE_CRITERIA[next_stage]
-            meets_wr = wr >= criteria["min_wr"]
-            meets_pf = pf >= criteria["min_pf"]
-            meets_trades = total >= criteria["min_trades"]
-            can_advance = meets_wr and meets_pf and meets_trades
-
+            can_advance = wr >= criteria["min_wr"] and pf >= criteria["min_pf"] and total >= criteria["min_trades"]
             stage_name = STAGES[next_stage]["name"]
             progress = (
                 f"{total}/{criteria['min_trades']} trades, "
@@ -410,7 +428,6 @@ class LearningEngine:
         else:
             progress = f"Etapa máxima alcanzada con {total} trades"
 
-        # Retroceso
         if total >= 20:
             recent_20 = trades[:20]
             recent_wr = sum(1 for t in recent_20 if (t.get("pnl_usd") or 0) > 0) / 20 * 100
@@ -420,11 +437,7 @@ class LearningEngine:
 
         return can_advance, should_retreat, progress
 
-    def get_context(self) -> LearningContext:
-        """
-        Genera el contexto de aprendizaje completo.
-        Este es el método principal — reemplaza get_learning_context().
-        """
+    def get_context(self):
         trades = self._get_closed_trades(200)
         total = len(trades)
         wins = sum(1 for t in trades if (t.get("pnl_usd") or 0) > 0)
@@ -442,7 +455,6 @@ class LearningEngine:
         adaptive_rules = self._generate_adaptive_rules(trades, pattern_stats, biases)
         can_advance, should_retreat, progress = self._evaluate_stage(trades)
 
-        # Best/worst patterns
         good = [ps.pattern_type for ps in pattern_stats if ps.win_rate >= 60 and ps.total_trades >= 3]
         bad = [ps.pattern_type for ps in pattern_stats if ps.win_rate < 40 and ps.total_trades >= 3]
 
@@ -468,9 +480,11 @@ class LearningEngine:
             should_retreat=should_retreat,
         )
 
+        validated_count = sum(1 for ps in pattern_stats if ps.is_statistically_validated)
         logger.info(
             f"Learning context: Stage {self.current_stage} ({stage_config['name']}) | "
             f"{total} trades | WR: {wr:.0f}% | PF: {pf:.1f}x | "
+            f"Validated patterns: {validated_count} | "
             f"Advance: {can_advance} | Retreat: {should_retreat}"
         )
 
