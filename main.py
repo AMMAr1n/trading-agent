@@ -355,9 +355,33 @@ class TradingAgent:
                     )
                     restored += 1
                 else:
+                    # Posición ya no existe en Binance — cerrar en BD
+
+                    # Bug 1 fix: Cancelar órdenes huérfanas (SL/TP que quedaron)
+                    try:
+                        raw_symbol = symbol.replace("/", "").replace(":USDT", "").replace("USDT", "")
+                        raw_symbol = raw_symbol + "USDT"
+                        algo_orders = await self.collector.binance.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
+                        orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
+                        cancelled = 0
+                        for order in orders:
+                            algo_id = order.get("algoId") or order.get("orderId")
+                            if algo_id:
+                                try:
+                                    await self.collector.binance.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
+                                    cancelled += 1
+                                except Exception:
+                                    pass
+                        if cancelled > 0:
+                            logger.info(f"Restore: {cancelled} órdenes huérfanas canceladas para {symbol}")
+                    except Exception as e:
+                        logger.warning(f"Restore: no se pudieron cancelar órdenes huérfanas de {symbol}: {e}")
+
+                    # Bug 2 fix: Obtener precio real y determinar si fue TP o SL
                     exit_price = 0.0
                     pnl_usd = 0.0
                     pnl_pct = 0.0
+                    close_reason = "cerrada_por_binance"
                     try:
                         raw_sym = symbol.replace("USDT", "/USDT:USDT")
                         trades_history = await self.collector.binance.exchange.fetch_my_trades(raw_sym, limit=5)
@@ -371,14 +395,32 @@ class TradingAgent:
                                 diff = (exit_price - entry_p) if dir_ == "long" else (entry_p - exit_price)
                                 pnl_usd = round(diff * qty, 2)
                                 pnl_pct = round((diff / entry_p) * 100, 2)
+
+                            # Determinar TP o SL comparando precio de cierre con niveles
+                            sl = trade.get("stop_loss", 0) or 0
+                            tp = trade.get("take_profit", 0) or 0
+                            if exit_price > 0 and sl > 0 and tp > 0:
+                                dist_to_sl = abs(exit_price - sl)
+                                dist_to_tp = abs(exit_price - tp)
+                                if dist_to_sl < dist_to_tp:
+                                    close_reason = "stop_loss"
+                                else:
+                                    close_reason = "take_profit"
+                            elif pnl_usd > 0:
+                                close_reason = "take_profit"
+                            elif pnl_usd < 0:
+                                close_reason = "stop_loss"
                     except Exception as e:
                         logger.warning(f"No se pudo obtener P&L para {symbol}: {e}")
-                    self.db.close_trade(trade_id=trade["id"], exit_price=exit_price, pnl_usd=pnl_usd, pnl_pct=pnl_pct, close_reason="cerrada_por_binance")
-                    if pnl_usd != 0 and self.executor.notifications_enabled:
+
+                    self.db.close_trade(trade_id=trade["id"], exit_price=exit_price, pnl_usd=pnl_usd, pnl_pct=pnl_pct, close_reason=close_reason)
+                    logger.info(f"Restore: {symbol} cerrada — {close_reason} | P&L: ${pnl_usd:.2f}")
+
+                    if self.executor.notifications_enabled:
                         asyncio.ensure_future(self.executor.notify_trade_closed(
                             symbol=symbol, direction=trade.get("direction", "long"),
                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, duration_min=0,
-                            close_reason="cerrada_por_binance",
+                            close_reason=close_reason,
                             amount_usd=trade.get("amount_usd", 0) or 0,
                             entry_price=trade.get("entry_price", 0) or 0,
                             exit_price=exit_price,

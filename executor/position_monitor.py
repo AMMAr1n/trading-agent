@@ -245,14 +245,20 @@ class PositionMonitor:
                 if trades_history:
                     last = trades_history[-1]
                     exit_price = float(last.get("price", 0) or 0)
-                    # Determinar si fue TP o SL comparando con niveles
+                    # Determinar si fue TP o SL comparando distancias
                     sl = meta.get("stop_loss", 0)
                     tp = meta.get("take_profit", 0)
                     if exit_price > 0 and sl > 0 and tp > 0:
-                        if direction == "long":
-                            close_reason = "take_profit" if exit_price >= tp * 0.995 else "stop_loss"
+                        dist_to_sl = abs(exit_price - sl)
+                        dist_to_tp = abs(exit_price - tp)
+                        if dist_to_sl < dist_to_tp:
+                            close_reason = "stop_loss"
                         else:
-                            close_reason = "take_profit" if exit_price <= tp * 1.005 else "stop_loss"
+                            close_reason = "take_profit"
+                    elif exit_price > 0 and entry > 0:
+                        # Fallback: si no hay SL/TP, usar P&L
+                        diff = (exit_price - entry) if direction == "long" else (entry - exit_price)
+                        close_reason = "take_profit" if diff > 0 else "stop_loss"
             except Exception as e:
                 logger.warning(f"PositionMonitor: no se pudo obtener precio de cierre real para {symbol}: {e}")
 
