@@ -1,7 +1,8 @@
 """
 analyzer.py — Orquestador del motor de análisis técnico
-Responsabilidad: coordinar indicadores, niveles y scorer para producir
-señales concretas listas para que Claude las evalúe.
+v0.7.1 — MTFAligner integrado en analyze_symbol.
+Los chart patterns ahora se detectan ANTES de calcular el score,
+así los patrones suman al score desde el principio.
 """
 
 import logging
@@ -9,59 +10,56 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+import pandas as pd
 from dotenv import load_dotenv
 
 from collector.models import CollectedSnapshot, ALL_SYMBOLS, FUTURES_SYMBOLS
 from .indicators import TechnicalIndicatorCalculator, TechnicalIndicators
 from .levels import SupportResistanceDetector, SupportResistanceResult
 from .scorer import SignalScorer, ScoreBreakdown
+from .mtf_alignment import MTFAligner, MTFAlignment
 
 load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
-# Timeframe principal para el análisis — balance entre señal y ruido
 PRIMARY_TIMEFRAME = "1h"
-CONFIRMATION_TIMEFRAME = "2h"  # Confirma la tendencia intermedia
-DAILY_TIMEFRAME = "1d"         # Tendencia mayor — filtro direccional
-WEEKLY_TIMEFRAME = "1w"        # Tendencia macro — visión de largo plazo
+CONFIRMATION_TIMEFRAME = "2h"
+DAILY_TIMEFRAME = "1d"
+WEEKLY_TIMEFRAME = "1w"
 
-# Score mínimo para considerar una señal válida
 MIN_SCORE = int(os.getenv("MIN_SCORE", "65"))
 LEVERAGE_2X_SCORE = int(os.getenv("LEVERAGE_2X_SCORE", "80"))
 
 
 @dataclass
 class TradingSignal:
-    """
-    Señal de trading completa — el output final del analizador.
-    Es lo que recibe Claude para tomar su decisión.
-    """
     symbol: str
-    trading_mode: str          # "futures" | "spot_tier1" | "spot_tier2" | "spot_tier3"
-    direction: str             # "long" | "short" (spot solo genera "long")
-    score: float               # Score de confianza 0-100
+    trading_mode: str
+    direction: str
+    score: float
     current_price: float
-    suggested_sl: float        # Stop-loss dinámico
-    suggested_tp: float        # Take-profit (ratio 1:2 mínimo)
-    risk_pct: float            # % de riesgo
-    leverage: str              # "1x" | "2x"
-    reasoning: str             # Explicación para Claude
+    suggested_sl: float
+    suggested_tp: float
+    risk_pct: float
+    leverage: str
+    reasoning: str
     indicators_1h: TechnicalIndicators
     indicators_4h: Optional[TechnicalIndicators]
     indicators_1d: Optional[TechnicalIndicators]
     levels: SupportResistanceResult
     indicators_1w: Optional[TechnicalIndicators] = None
+    mtf_alignment: Optional[MTFAlignment] = None
 
     @property
     def is_autonomous(self) -> bool:
-        """
-        True si esta operación puede ejecutarse sin VoBo del operador.
-        Depende del monto calculado vs VOBO_MIN_PCT — se evalúa en el executor.
-        """
-        return True  # El executor decide basado en el monto real
+        return True
 
     @property
     def summary(self) -> str:
+        pattern_info = ""
+        if self.mtf_alignment and self.mtf_alignment.best_pattern:
+            bp = self.mtf_alignment.best_pattern
+            pattern_info = f" | Pattern: {bp.pattern_type}({bp.timeframe})"
         return (
             f"{self.symbol} {self.direction.upper()} | "
             f"Score: {self.score:.0f}/100 | "
@@ -70,19 +68,16 @@ class TradingSignal:
             f"TP: ${self.suggested_tp:,.4f} | "
             f"Riesgo: {self.risk_pct:.1f}% | "
             f"Apalancamiento: {self.leverage}"
+            f"{pattern_info}"
         )
 
 
 @dataclass
 class AnalysisResult:
-    """
-    Resultado completo del ciclo de análisis.
-    Contiene todas las señales detectadas ordenadas por score.
-    """
-    signals: list[TradingSignal]      # Señales válidas (score >= MIN_SCORE)
-    analyzed_symbols: int             # Cuántos activos se analizaron
-    skipped_symbols: list[str]        # Activos sin datos suficientes
-    best_signal: Optional[TradingSignal]  # La señal con mayor score
+    signals: list[TradingSignal]
+    analyzed_symbols: int
+    skipped_symbols: list[str]
+    best_signal: Optional[TradingSignal]
 
     @property
     def has_signals(self) -> bool:
@@ -98,25 +93,13 @@ class AnalysisResult:
 
 
 class TechnicalAnalyzer:
-    """
-    Motor de análisis técnico completo.
-
-    Toma el CollectedSnapshot del colector y produce señales
-    de trading concretas listas para Claude.
-
-    Uso:
-        analyzer = TechnicalAnalyzer()
-        result = analyzer.analyze(snapshot)
-        for signal in result.signals:
-            print(signal.summary)
-    """
 
     def __init__(self):
         self.indicator_calc = TechnicalIndicatorCalculator()
         self.level_detector = SupportResistanceDetector()
         self.scorer = SignalScorer()
+        self.mtf_aligner = MTFAligner()
 
-        # Activos protegidos en HOLD — nunca generar señales para estos
         hold_symbols_env = os.getenv("HOLD_SYMBOLS", "")
         self.hold_symbols = [
             s.strip() for s in hold_symbols_env.split(",")
@@ -131,7 +114,6 @@ class TechnicalAnalyzer:
         )
 
     def get_trading_mode(self, symbol: str) -> str:
-        """Determina el modo de trading para cada activo."""
         from collector.models import FUTURES_SYMBOLS, SPOT_TIER1, SPOT_TIER2, SPOT_TIER3
         if symbol in FUTURES_SYMBOLS:
             return "futures"
@@ -142,182 +124,168 @@ class TechnicalAnalyzer:
         else:
             return "spot_tier3"
 
-    def calculate_context_bonus(
-        self,
-        snapshot: CollectedSnapshot,
-        direction: str
-    ) -> float:
-        """
-        Calcula puntos bonus basados en el contexto macro.
-        Máximo +10 puntos adicionales al score base.
-        """
+    def calculate_context_bonus(self, snapshot, direction):
         bonus = 0.0
         fg = snapshot.market_context.fear_greed_index
-
         if direction == "long":
-            # Fear & Greed muy bajo → mercado con miedo → oportunidad de compra contrarian
             if fg <= 20:
                 bonus += 5.0
             elif fg <= 35:
                 bonus += 2.0
-            # BTC dominance alta → el mercado está en modo defensivo → altcoins caen más
             if snapshot.market_context.btc_dominance > 60:
                 bonus += 2.0
-
         elif direction == "short":
-            # Fear & Greed muy alto → mercado codicioso → posible corrección
             if fg >= 80:
                 bonus += 5.0
             elif fg >= 65:
                 bonus += 2.0
-
-        # Whale alerts recientes pueden añadir o restar
         for alert in snapshot.whale_alerts:
             if alert.is_bearish_signal and direction == "short":
                 bonus += 3.0
             elif alert.is_bullish_signal and direction == "long":
                 bonus += 3.0
-
         return min(bonus, 10.0)
 
-    def analyze_symbol(
-        self,
-        symbol: str,
-        snapshot: CollectedSnapshot
-    ) -> Optional[TradingSignal]:
+    def _build_candles_dataframes(self, symbol: str, snapshot: CollectedSnapshot) -> dict:
         """
-        Analiza un activo específico y retorna una señal si el score es suficiente.
-        Retorna None si no hay señal válida.
+        Convierte las velas del snapshot en DataFrames para el MTFAligner.
+        Retorna dict de {timeframe: pd.DataFrame}.
         """
-        # Verificar que hay datos disponibles
+        candles_by_tf = {}
+        if symbol not in snapshot.candles:
+            return candles_by_tf
+
+        for tf, candle_list in snapshot.candles[symbol].items():
+            if candle_list and len(candle_list) >= 20:
+                try:
+                    data = {
+                        "open": [c.open for c in candle_list],
+                        "high": [c.high for c in candle_list],
+                        "low": [c.low for c in candle_list],
+                        "close": [c.close for c in candle_list],
+                        "volume": [c.volume for c in candle_list],
+                    }
+                    candles_by_tf[tf] = pd.DataFrame(data)
+                except Exception as e:
+                    logger.debug(f"Error convirtiendo velas {symbol}/{tf}: {e}")
+
+        return candles_by_tf
+
+    def analyze_symbol(self, symbol, snapshot):
         if symbol not in snapshot.candles:
             return None
 
-        candles_by_tf = snapshot.candles[symbol]
+        candles_by_tf_raw = snapshot.candles[symbol]
 
-        # Necesitamos las velas del timeframe principal
-        if PRIMARY_TIMEFRAME not in candles_by_tf:
+        if PRIMARY_TIMEFRAME not in candles_by_tf_raw:
             return None
 
-        candles_1h = candles_by_tf[PRIMARY_TIMEFRAME]
-        candles_2h = candles_by_tf.get(CONFIRMATION_TIMEFRAME, [])
-        candles_1d = candles_by_tf.get(DAILY_TIMEFRAME, [])
-        candles_1w = candles_by_tf.get(WEEKLY_TIMEFRAME, [])
+        candles_1h = candles_by_tf_raw[PRIMARY_TIMEFRAME]
+        candles_2h = candles_by_tf_raw.get(CONFIRMATION_TIMEFRAME, [])
+        candles_1d = candles_by_tf_raw.get(DAILY_TIMEFRAME, [])
+        candles_1w = candles_by_tf_raw.get(WEEKLY_TIMEFRAME, [])
 
-        # Calcular indicadores en timeframe principal
         indicators_1h = self.indicator_calc.calculate(symbol, PRIMARY_TIMEFRAME, candles_1h)
         if not indicators_1h:
             return None
 
-        # Calcular indicadores en timeframe de confirmación (opcional)
         indicators_4h = None
         if candles_2h:
             indicators_4h = self.indicator_calc.calculate(symbol, CONFIRMATION_TIMEFRAME, candles_2h)
 
-        # Calcular indicadores diarios — tendencia mayor
         indicators_1d = None
         if candles_1d and len(candles_1d) >= 50:
             indicators_1d = self.indicator_calc.calculate(symbol, DAILY_TIMEFRAME, candles_1d)
 
-        # Calcular indicadores semanales — tendencia macro
         indicators_1w = None
         if candles_1w and len(candles_1w) >= 20:
             indicators_1w = self.indicator_calc.calculate(symbol, WEEKLY_TIMEFRAME, candles_1w)
 
-        # Detectar soportes y resistencias
         levels = self.level_detector.detect(symbol, candles_1h)
 
-        # Calcular bonus de contexto macro
         direction = indicators_1h.suggested_direction
         if direction == "neutral":
             return None
 
-        # Todos los pares son futuros perpetuos — LONG y SHORT permitidos
         trading_mode = self.get_trading_mode(symbol)
-
         context_bonus = self.calculate_context_bonus(snapshot, direction)
 
-        # Calcular score final
-        score = self.scorer.calculate(indicators_1h, levels, context_bonus)
+        # ── v0.7.1: MTF Alignment ANTES del score ─────────────────────
+        mtf_alignment = None
+        try:
+            candles_dfs = self._build_candles_dataframes(symbol, snapshot)
+            if candles_dfs:
+                mtf_alignment = self.mtf_aligner.analyze(candles_dfs, symbol)
 
-        # Si el score no supera el mínimo, no hay señal
+                # Veto: si el TF mayor tiene un patron fuerte en direccion contraria
+                if mtf_alignment.veto_reason and mtf_alignment.consensus_direction != "neutral":
+                    if mtf_alignment.consensus_direction != direction:
+                        logger.info(
+                            f"{symbol} — VETO por MTF: {mtf_alignment.veto_reason} "
+                            f"(agente quiere {direction}, MTF dice {mtf_alignment.consensus_direction})"
+                        )
+                        return None
+        except Exception as e:
+            logger.warning(f"MTF alignment error para {symbol}: {e}")
+        # ──────────────────────────────────────────────────────────────
+
+        # Score con MTF alignment incluido
+        score = self.scorer.calculate(indicators_1h, levels, context_bonus,
+                                      mtf_alignment=mtf_alignment)
+
         if not score.is_tradeable:
             logger.info(
                 f"{symbol} — Score insuficiente: {score.total:.0f}/{MIN_SCORE} "
-            f"(EMA:{score.ema_trend_points:.0f} Vol:{score.volume_points:.0f} "
-            f"MACD:{score.macd_points:.0f} RSI:{score.rsi_points:.0f} BB:{score.bollinger_points:.0f})"
+                f"(EMA:{score.ema_trend_points:.0f} Vol:{score.volume_points:.0f} "
+                f"MACD:{score.macd_points:.0f} RSI:{score.rsi_points:.0f} "
+                f"BB:{score.bollinger_points:.0f} "
+                f"Pat:{score.chart_pattern_points:.0f} BO:{score.breakout_points:.0f})"
             )
             return None
 
-        # ── Modificador 1D — tendencia mayor ajusta score y tamaño ─────────
-        # En vez de descartar, penaliza el score según la contradicción
-        daily_penalty = 0.0
-        daily_context = ""
+        # ── Modificador 1D — tendencia mayor ───────────────────────────
         if indicators_1d:
             direction_1d = indicators_1d.suggested_direction
-            trend_1d     = indicators_1d.trend
-
+            trend_1d = indicators_1d.trend
             if direction_1d != "neutral" and direction_1d != direction:
-                # Contradicción mayor: reducir score significativamente
-                if "strong" in trend_1d:
-                    daily_penalty = 25.0  # strong_downtrend contra LONG → -25 pts
-                    daily_context = f"strong_downtrend diario"
-                else:
-                    daily_penalty = 15.0  # downtrend moderado → -15 pts
-                    daily_context = f"downtrend diario"
-
+                daily_penalty = 25.0 if "strong" in trend_1d else 15.0
                 score_ajustado = score.total - daily_penalty
                 if score_ajustado < MIN_SCORE:
                     logger.info(
-                        f"{symbol} — Score ajustado por {daily_context}: "
-                        f"{score.total:.0f} - {daily_penalty:.0f} = {score_ajustado:.0f} "
-                        f"(mínimo {MIN_SCORE}) — señal descartada"
+                        f"{symbol} — Score ajustado por tendencia diaria: "
+                        f"{score.total:.0f} - {daily_penalty:.0f} = {score_ajustado:.0f} — descartada"
                     )
                     return None
-
-                logger.info(
-                    f"{symbol} — Penalización por {daily_context}: "
-                    f"score {score.total:.0f} → {score_ajustado:.0f}"
-                )
-                # Reducir score para que Claude sepa que hay contradicción
                 score.total = round(score_ajustado, 1)
             elif direction_1d == direction:
-                # Alineación diaria — bonus +5 pts
                 score.total = min(round(score.total + 5, 1), 100.0)
-                logger.info(f"{symbol} — Bonus por alineación diaria: score → {score.total:.0f}")
-        # ──────────────────────────────────────────────────────────────────
 
-        # ── Modificador 1W — tendencia macro ─────────────────────────────
+        # ── Modificador 1W — tendencia macro ───────────────────────────
         if indicators_1w:
             direction_1w = indicators_1w.suggested_direction
-            trend_1w     = indicators_1w.trend
+            trend_1w = indicators_1w.trend
             if direction_1w != "neutral" and direction_1w != direction:
                 weekly_penalty = 15.0 if "strong" in trend_1w else 10.0
                 score_1w = score.total - weekly_penalty
                 if score_1w < MIN_SCORE:
                     logger.info(
-                        f"{symbol} — Score ajustado por tendencia semanal ({trend_1w}): "
+                        f"{symbol} — Score ajustado por tendencia semanal: "
                         f"{score.total:.0f} - {weekly_penalty:.0f} = {score_1w:.0f} — descartada"
                     )
                     return None
                 score.total = round(score_1w, 1)
-                logger.info(f"{symbol} — Penalización semanal: score → {score.total:.0f}")
             elif direction_1w == direction:
                 score.total = min(round(score.total + 8, 1), 100.0)
-                logger.info(f"{symbol} — Bonus alineación semanal: score → {score.total:.0f}")
-        # ──────────────────────────────────────────────────────────────────
 
-        # Confirmación con timeframe 2h
+        # ── Confirmacion 2h ────────────────────────────────────────────
         if indicators_4h:
             direction_4h = indicators_4h.suggested_direction
             if direction_4h != "neutral" and direction_4h != direction:
                 logger.info(
-                    f"{symbol} — Contradicción entre 1h ({direction}) "
-                    f"y 2h ({direction_4h}) — señal descartada"
+                    f"{symbol} — Contradiccion 1h/2h ({direction} vs {direction_4h}) — descartada"
                 )
                 return None
 
-        # Determinar apalancamiento
         leverage = score.leverage_recommended if trading_mode == "futures" else "1x"
 
         signal = TradingSignal(
@@ -336,20 +304,17 @@ class TechnicalAnalyzer:
             indicators_1d=indicators_1d,
             indicators_1w=indicators_1w,
             levels=levels,
+            mtf_alignment=mtf_alignment,
         )
 
-        logger.info(f"Señal detectada: {signal.summary}")
+        logger.info(f"Senal detectada: {signal.summary}")
         return signal
 
-    def analyze(self, snapshot: CollectedSnapshot) -> AnalysisResult:
-        """
-        Analiza todos los activos del portafolio y retorna las señales válidas.
-        """
+    def analyze(self, snapshot):
         if snapshot.has_critical_gaps:
-            logger.warning("Snapshot con gaps críticos — análisis cancelado")
+            logger.warning("Snapshot con gaps criticos — analisis cancelado")
             return AnalysisResult(
-                signals=[],
-                analyzed_symbols=0,
+                signals=[], analyzed_symbols=0,
                 skipped_symbols=list(snapshot.candles.keys()),
                 best_signal=None
             )
@@ -359,20 +324,15 @@ class TechnicalAnalyzer:
         analyzed = 0
 
         for symbol in snapshot.available_symbols:
-            # No analizar activos en HOLD
             if symbol in self.hold_symbols:
-                logger.debug(f"{symbol} en HOLD — saltando análisis")
                 continue
-
             analyzed += 1
-
             signal = self.analyze_symbol(symbol, snapshot)
             if signal:
                 signals.append(signal)
             else:
                 skipped.append(symbol)
 
-        # Ordenar señales por score descendente
         signals.sort(key=lambda s: s.score, reverse=True)
 
         result = AnalysisResult(
