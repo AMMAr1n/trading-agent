@@ -1,5 +1,6 @@
 """
 notifier.py — Notificaciones por Telegram
+v0.7.2 — Fix reporte periódico: muestra posiciones abiertas y cerradas del periodo.
 """
 
 import logging
@@ -92,28 +93,15 @@ class TelegramNotifier:
         )
 
     def notify_trade_opened(
-        self,
-        symbol: str,
-        direction: str,
-        amount_usd: float,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
-        leverage: str,
-        reasoning: str,
-        account_balance: float = 0.0,
-        trade_amount: float = 0.0,
-        usdt_total: float = 0.0,
-        margin_in_use: float = 0.0,
-        reserve: float = 0.0,
-        operable: float = 0.0,
+        self, symbol, direction, amount_usd, entry_price, stop_loss,
+        take_profit, leverage, reasoning, account_balance=0.0,
+        trade_amount=0.0, usdt_total=0.0, margin_in_use=0.0,
+        reserve=0.0, operable=0.0,
     ) -> bool:
         arrow = "📈" if direction == "long" else "📉"
         direction_str = "SUBE (LONG)" if direction == "long" else "BAJA (SHORT)"
         monto = trade_amount if trade_amount > 0 else amount_usd
         precio_entrada = entry_price
-
-        # Desglose de capital
         total = usdt_total if usdt_total > 0 else account_balance
         capital_section = (
             f"💰 Saldo total: <b>${total:.2f} USDT</b>\n"
@@ -122,8 +110,7 @@ class TelegramNotifier:
             f"✅ Saldo operable: <b>${operable:.2f} USDT</b>\n"
             f"📌 Esta operación: <b>${monto:.2f} USDT</b>"
         )
-
-        # P&L estimado
+        pnl_lines = ""
         if precio_entrada > 0 and stop_loss > 0 and take_profit > 0:
             if direction == "long":
                 riesgo_pct   = (precio_entrada - stop_loss) / precio_entrada * 100
@@ -141,9 +128,6 @@ class TelegramNotifier:
                 f"❌ Si SL (${stop_loss:,.4f}): <b>-${riesgo_usd:.2f} USD (-{riesgo_pct:.1f}%)</b>\n"
                 f"Ratio R/R: <b>1:{rr_ratio:.1f}</b>"
             )
-        else:
-            pnl_lines = ""
-
         msg1 = (
             f"{arrow} <b>OPERACIÓN ABIERTA</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -160,7 +144,6 @@ class TelegramNotifier:
             f"{pnl_lines}"
         )
         self._send_single(msg1)
-
         if reasoning:
             self.send(
                 f"🧠 <b>RAZONAMIENTO — {symbol}</b>\n"
@@ -170,23 +153,13 @@ class TelegramNotifier:
         return True
 
     def notify_vobo_request(
-        self,
-        symbol: str,
-        direction: str,
-        amount_usd: float,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
-        leverage: str,
-        reasoning: str,
-        timeout_min: int = 10,
-        account_balance: float = 0.0,
-        trade_amount: float = 0.0
+        self, symbol, direction, amount_usd, entry_price,
+        stop_loss, take_profit, leverage, reasoning,
+        timeout_min=10, account_balance=0.0, trade_amount=0.0
     ) -> bool:
         arrow = "📈" if direction == "long" else "📉"
         direction_str = "SUBE (LONG)" if direction == "long" else "BAJA (SHORT)"
         monto = trade_amount if trade_amount > 0 else amount_usd
-
         msg1 = (
             f"{arrow} <b>SOLICITUD DE APROBACIÓN</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -201,11 +174,10 @@ class TelegramNotifier:
             f"Stop-loss: <b>${stop_loss:,.4f}</b>\n"
             f"Take-profit: <b>${take_profit:,.4f}</b>\n"
             f"\n"
-            f"Responde <b>SI</b> para aprobar o <b>NO</b> para cancelar\n"
-            f"(Expira en {timeout_min} minutos)"
+            f"⏱ Tiempo para aprobar: <b>{timeout_min} minutos</b>\n"
+            f"Responde 'ok' para aprobar, cualquier otra cosa cancela."
         )
         self._send_single(msg1)
-
         if reasoning:
             self.send(
                 f"🧠 <b>RAZONAMIENTO — {symbol}</b>\n"
@@ -215,66 +187,54 @@ class TelegramNotifier:
         return True
 
     def notify_trade_closed(
-        self,
-        symbol: str,
-        direction: str,
-        pnl_usd: float,
-        pnl_pct: float,
-        duration_min: int,
-        close_reason: str,
-        entry_price: float = 0.0,
-        exit_price: float = 0.0,
-        account_balance_after: float = 0.0,
-        usdt_total: float = 0.0,
-        margin_in_use: float = 0.0,
-        reserve: float = 0.0,
-        operable: float = 0.0,
+        self, symbol, direction, pnl_usd, pnl_pct,
+        duration_min=0, close_reason="", entry_price=0.0,
+        exit_price=0.0, account_balance_after=0.0,
+        usdt_total=0.0, margin_in_use=0.0, reserve=0.0, operable=0.0,
     ) -> bool:
-        emoji  = "✅" if pnl_usd > 0 else "❌"
-        result = "GANANCIA" if pnl_usd > 0 else "PÉRDIDA"
-        sign   = "+" if pnl_usd > 0 else ""
-
-        price_lines = ""
-        if entry_price > 0 and exit_price > 0:
-            price_lines = f"Entrada: <b>${entry_price:,.4f}</b>  →  Salida: <b>${exit_price:,.4f}</b>\n"
-
-        # Desglose post-cierre
-        total = usdt_total if usdt_total > 0 else account_balance_after
+        arrow = "📈" if direction == "long" else "📉"
+        emoji = "✅" if pnl_usd >= 0 else "❌"
+        sign = "+" if pnl_usd >= 0 else ""
+        reason_str = ""
+        if "take_profit" in str(close_reason).lower() or "tp" in str(close_reason).lower():
+            reason_str = "✅ Take Profit alcanzado"
+        elif "stop_loss" in str(close_reason).lower() or "sl" in str(close_reason).lower():
+            reason_str = "❌ Stop Loss tocado"
+        else:
+            reason_str = f"Razón: {close_reason}"
+        hours = duration_min // 60
+        mins = duration_min % 60
+        dur_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
         balance_section = ""
-        if total > 0:
+        if usdt_total > 0:
             balance_section = (
-                f"\n💰 <b>SALDO POST-CIERRE</b>\n"
-                f"💰 Saldo total: <b>${total:.2f} USDT</b>\n"
+                f"\n💰 Saldo total: <b>${usdt_total:.2f} USDT</b>\n"
                 f"🔒 Margen en uso: <b>${margin_in_use:.2f} USDT</b>\n"
-                f"🏦 Reserva (10%): <b>${reserve:.2f} USDT</b>\n"
-                f"✅ Saldo operable: <b>${operable:.2f} USDT</b>"
+                f"🏦 Reserva: <b>${reserve:.2f} USDT</b>\n"
+                f"✅ Operable: <b>${operable:.2f} USDT</b>"
             )
-
         return self.send(
-            f"{emoji} <b>OPERACIÓN CERRADA — {result}</b>\n"
+            f"{emoji} <b>OPERACIÓN CERRADA — {symbol}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"Activo: <b>{symbol}</b> ({direction.upper()})\n"
-            f"{price_lines}"
-            f"Resultado: <b>{sign}${pnl_usd:.2f} USD ({sign}{pnl_pct:.1f}%)</b>\n"
-            f"Duración: {duration_min} min\n"
-            f"Motivo: {close_reason}"
+            f"{arrow} Dirección: {direction.upper()}\n"
+            f"Entrada: ${entry_price:,.4f} → Salida: ${exit_price:,.4f}\n"
+            f"P&L: <b>{sign}${pnl_usd:.2f} USD ({sign}{pnl_pct:.1f}%)</b>\n"
+            f"Duración: {dur_str}\n"
+            f"{reason_str}"
             f"{balance_section}"
         )
 
-    def notify_capital_alert(
-        self, level: str, current_balance: float,
-        initial_balance: float, pct_remaining: float
-    ) -> bool:
+    def notify_capital_alert(self, level, current_balance, initial_balance, pct_remaining):
         emojis  = {"yellow": "🟡", "orange": "🟠", "red": "🔴"}
         headers = {
-            "yellow": "ALERTA DE CAPITAL",
-            "orange": "ALERTA CRÍTICA",
-            "red":    "EMERGENCIA — CAPITAL MÍNIMO"
+            "yellow": "ALERTA DE CAPITAL — NIVEL AMARILLO",
+            "orange": "ALERTA DE CAPITAL — NIVEL NARANJA",
+            "red":    "ALERTA DE CAPITAL — NIVEL ROJO"
         }
         actions = {
-            "yellow": "El agente continúa operando.",
-            "orange": "El agente redujo el tamaño de operaciones.",
-            "red":    "El agente SE DETUVO. Deposita USDT para reactivarlo."
+            "yellow": "El agente reduce el tamaño de posición.",
+            "orange": "El agente opera con mínimos.",
+            "red":    "El agente se detiene hasta que el capital se recupere."
         }
         return self.send(
             f"{emojis[level]} <b>{headers[level]}</b>\n"
@@ -284,10 +244,8 @@ class TelegramNotifier:
         )
 
     def notify_insufficient_amount(
-        self, symbol: str, amount_usd: float,
-        min_required: float, score: float = 0.0,
-        usdt_total: float = 0.0, margin_in_use: float = 0.0,
-        reserve: float = 0.0, operable: float = 0.0
+        self, symbol, amount_usd, min_required, score=0.0,
+        usdt_total=0.0, margin_in_use=0.0, reserve=0.0, operable=0.0
     ) -> bool:
         score_line = f"Score de la señal: <b>{score:.0f}/100</b>\n" if score > 0 else ""
         balance_section = ""
@@ -307,7 +265,7 @@ class TelegramNotifier:
             f"El agente saltó este par."
         )
 
-    def notify_connection_error(self, details: str) -> bool:
+    def notify_connection_error(self, details):
         return self.send(
             f"📡 <b>ERROR DE CONEXIÓN</b>\n"
             f"No se pudo conectar con Binance.\n"
@@ -315,7 +273,7 @@ class TelegramNotifier:
             f"El agente reintentará en el próximo ciclo."
         )
 
-    def notify_unexpected_error(self, context: str, details: str) -> bool:
+    def notify_unexpected_error(self, context, details):
         return self.send(
             f"🚨 <b>ERROR INESPERADO</b>\n"
             f"Contexto: {context}\n"
@@ -323,7 +281,7 @@ class TelegramNotifier:
             f"Revisa los logs en la VM."
         )
 
-    def notify_critical_error(self, error_msg: str) -> bool:
+    def notify_critical_error(self, error_msg):
         msg = error_msg.lower()
         if "minimum amount" in msg or "mínimo de costo" in msg or "monto" in msg:
             return self.send(f"⚠️ <b>MONTO INSUFICIENTE</b>\n{error_msg[:300]}\nEl agente saltó este par.")
@@ -334,7 +292,7 @@ class TelegramNotifier:
         else:
             return self.send(f"🚨 <b>ERROR CRÍTICO DEL AGENTE</b>\n{error_msg[:300]}\nRevisa el servidor.")
 
-    def notify_vobo_timeout(self, symbol: str, amount_usd: float) -> bool:
+    def notify_vobo_timeout(self, symbol, amount_usd):
         return self.send(
             f"⏱ <b>VOBO EXPIRADO</b>\n"
             f"La operación de {symbol} por ${amount_usd:.2f} USD fue cancelada.\n"
@@ -342,24 +300,22 @@ class TelegramNotifier:
         )
 
     def notify_daily_report(
-        self,
-        date: str,
-        total_trades: int,
-        winning_trades: int,
-        losing_trades: int,
-        total_pnl: float,
-        win_rate: float,
-        starting_balance: float,
-        ending_balance: float,
-        open_positions: list = None,
-        period_label: str = ""
+        self, date, total_trades, winning_trades, losing_trades,
+        total_pnl, win_rate, starting_balance, ending_balance,
+        open_positions=None, period_label="",
+        open_count=0, closed_in_period=0,
+        closed_tp=0, closed_sl=0,
     ) -> bool:
+        """
+        v0.7.2: Reporte periódico corregido.
+        - Muestra posiciones abiertas actuales
+        - Muestra cerradas en el periodo (TP vs SL)
+        """
         balance_change = ending_balance - starting_balance
         sign  = "+" if balance_change >= 0 else ""
         emoji = "✅" if total_pnl >= 0 else "❌"
-        # Título dinámico por período del día
+
         if not period_label:
-            from datetime import datetime
             hour = datetime.now().hour
             if hour < 6:
                 period_label = "RESUMEN DE LA NOCHE"
@@ -370,7 +326,15 @@ class TelegramNotifier:
             else:
                 period_label = "RESUMEN DE LA TARDE"
 
-        # ── Fix #6: posiciones abiertas con distancias ───────────────────────
+        # Línea de operaciones corregida
+        ops_line = f"Posiciones abiertas: <b>{open_count}</b>"
+        if closed_in_period > 0:
+            ops_line += f" | Cerradas: <b>{closed_in_period}</b> ({closed_tp} TP, {closed_sl} SL)"
+            ops_line += f"\nWin rate periodo: {win_rate:.0f}%"
+        else:
+            ops_line += " | Sin cierres en este periodo"
+
+        # Posiciones abiertas con detalles
         positions_section = ""
         if open_positions:
             positions_section = "\n\n📂 <b>POSICIONES ABIERTAS</b>"
@@ -384,7 +348,6 @@ class TelegramNotifier:
                 current   = pos.get("current_price", entry) or entry
                 arrow     = "📈" if direction == "long" else "📉"
 
-                # P&L actual
                 if entry > 0 and current > 0:
                     pnl_pct = ((current - entry) / entry * 100) if direction == "long" \
                               else ((entry - current) / entry * 100)
@@ -394,7 +357,6 @@ class TelegramNotifier:
                 else:
                     pnl_str = "N/A"
 
-                # Distancias a SL y TP
                 dist_sl_pct = abs((entry - sl) / entry * 100) if entry > 0 and sl > 0 else 0
                 dist_sl_usd = amount * (dist_sl_pct / 100)
                 dist_tp_pct = abs((tp - entry) / entry * 100) if entry > 0 and tp > 0 else 0
@@ -410,33 +372,23 @@ class TelegramNotifier:
 
         return self.send(
             f"📊 <b>{period_label} — {date}</b>\n"
-            f"{emoji} P&L: <b>{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USD</b>\n"
-            f"Operaciones: {total_trades} | Ganadoras: {winning_trades} | Perdedoras: {losing_trades}\n"
-            f"Win rate: {win_rate:.0f}%\n"
+            f"{emoji} P&L del periodo: <b>{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USD</b>\n"
+            f"{ops_line}\n"
             f"Saldo: ${starting_balance:.2f} → <b>${ending_balance:.2f} USD</b> ({sign}${balance_change:.2f})"
             f"{positions_section}\n"
             f"¡Hasta el próximo reporte! 🚀"
         )
 
     def notify_skipped(
-        self,
-        symbol: str,
-        direction: str = "",
-        score: float = 0.0,
-        reason: str = "",
-        min_required: float = 0.0,
-        usdt_total: float = 0.0,
-        margin_in_use: float = 0.0,
-        reserve: float = 0.0,
-        operable: float = 0.0,
+        self, symbol, direction="", score=0.0, reason="",
+        min_required=0.0, usdt_total=0.0, margin_in_use=0.0,
+        reserve=0.0, operable=0.0,
     ) -> bool:
         arrow = "📈" if direction == "long" else "📉" if direction == "short" else "⚪"
         direction_str = "LONG (SUBE)" if direction == "long" else "SHORT (BAJA)" if direction == "short" else ""
         signal_parts = [f"<b>{symbol}</b>"]
         if direction_str:
             signal_parts.append(direction_str)
-        if score > 0:
-            signal_parts.append(f"Score: <b>{score:.0f}/100</b>")
         signal_line = f"{arrow} Señal: {' — '.join(signal_parts[:2])}"
         if score > 0:
             signal_line += f" | Score: <b>{score:.0f}/100</b>"
@@ -454,8 +406,7 @@ class TelegramNotifier:
         )
 
     def notify_agent_started(
-        self, balance: float, operable: float = 0.0,
-        margin_in_use: float = 0.0, reserve: float = 0.0
+        self, balance=0.0, operable=0.0, margin_in_use=0.0, reserve=0.0
     ) -> bool:
         return self.send(
             f"🤖 <b>AGENTE INICIADO</b>\n"

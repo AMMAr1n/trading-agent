@@ -1,5 +1,6 @@
 """
 executor.py — Orquestador principal del executor
+v0.7.2 — Fix reporte periódico con posiciones abiertas y cerradas del periodo.
 """
 
 import logging
@@ -18,11 +19,8 @@ from .order_executor import OrderExecutor, OrderResult
 load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
-# Position sizing — Fixed Fractional method (Position Sizer skill)
-# Nunca arriesgar más del RISK_PCT del capital operable por trade
-RISK_PCT = float(os.getenv("RISK_PCT", "1.0")) / 100   # default 1%
-# ATR multiplier para calcular distancia al stop (Turtle Traders: 2x)
-ATR_MULTIPLIER = float(os.getenv("ATR_MULTIPLIER", "1.5"))  # 1.5x para swing corto
+RISK_PCT = float(os.getenv("RISK_PCT", "1.0")) / 100
+ATR_MULTIPLIER = float(os.getenv("ATR_MULTIPLIER", "1.5"))
 
 
 class TradingExecutor:
@@ -42,7 +40,6 @@ class TradingExecutor:
             self.notifier = None
             self.notifications_enabled = False
 
-        # Pasar notifier al order_executor para alertas de SL/TP
         self.order_executor.notifier = self.notifier
 
         self.alert_yellow_pct = float(os.getenv("ALERT_YELLOW_PCT", "30")) / 100
@@ -55,7 +52,7 @@ class TradingExecutor:
         self._last_alert_level: Optional[str] = None
         self._daily_trades = []
         self._committed_usd: float = 0.0
-        self.db = None  # Se asigna desde main.py después de inicializar
+        self.db = None
 
         logger.info(
             f"TradingExecutor inicializado | "
@@ -77,38 +74,15 @@ class TradingExecutor:
         max_allowed = balance.usdt_free * self.max_capital_pct
         return max(0.0, max_allowed - self._committed_usd)
 
-    def _calculate_position_size(
-        self,
-        decision: TradeDecision,
-        balance: BalanceInfo,
-        capital_disponible: float
-    ) -> float:
-        """
-        Calcula el tamaño de posición usando Fixed Fractional method.
-
-        Basado en Position Sizer skill:
-        - dollar_risk = capital_operable * RISK_PCT (1% por defecto)
-        - Si hay ATR: stop_distance = ATR * ATR_MULTIPLIER
-          amount = dollar_risk / stop_distance * entry_price
-        - Si no hay ATR: usa porcentaje de capital según volumen (método anterior)
-
-        El skill recomienda nunca exceder 2% de riesgo. Con $29 capital:
-        - 1% riesgo = $0.29 máximo a perder por trade
-        - Esto es muy conservador pero correcto para cuentas pequeñas
-        """
+    def _calculate_position_size(self, decision, balance, capital_disponible):
         dollar_risk = balance.operable * RISK_PCT
         atr = getattr(decision, 'atr_14', 0.0) or 0.0
-
         if atr > 0 and decision.stop_loss > 0:
-            # ── ATR-based sizing ──────────────────────────────────────────
             stop_distance = atr * ATR_MULTIPLIER
-            entry_price   = decision.stop_loss  # aproximado pre-fill
-
+            entry_price   = decision.stop_loss
             if stop_distance > 0 and entry_price > 0:
-                # Cuántas unidades podemos comprar dado el riesgo en USD
                 units = dollar_risk / stop_distance
                 amount_atr = units * entry_price
-
                 logger.info(
                     f"ATR sizing: ATR={atr:.4f} | "
                     f"Stop dist={stop_distance:.4f} ({ATR_MULTIPLIER}x ATR) | "
@@ -116,8 +90,6 @@ class TradingExecutor:
                     f"Monto ATR=${amount_atr:.2f}"
                 )
                 return amount_atr
-        
-        # ── Fallback: Fixed Fractional por volumen ────────────────────────
         volume_ratio = getattr(decision, 'volume_ratio', 1.0) or 1.0
         if volume_ratio < 0.5:
             return balance.operable * 0.15
@@ -128,46 +100,30 @@ class TradingExecutor:
         else:
             return balance.operable * 0.40
 
-    async def check_balance(self) -> Optional[BalanceInfo]:
+    async def check_balance(self):
         balance = await self.balance_checker.get_balance()
-
         if balance is None:
             if self.notifications_enabled:
-                self.notifier.notify_critical_error(
-                    "No se pudo conectar con Binance para consultar el saldo."
-                )
+                self.notifier.notify_critical_error("No se pudo conectar con Binance para consultar el saldo.")
             return None
-
         if self._daily_starting_balance is None:
             self._daily_starting_balance = balance.usdt_free
             logger.info(f"Saldo inicial del dia: ${self._daily_starting_balance:.2f} USD")
-
         await self._check_capital_alerts(balance)
-
         if self._last_alert_level == "red":
             logger.critical("Capital en reserva mínima — agente detenido")
             return None
-
         if not balance.has_sufficient_funds:
-            logger.warning(
-                f"Sin fondos suficientes: ${balance.operable:.2f} disponible, "
-                f"mínimo ${balance.min_trade_amount:.2f}"
-            )
-            # Notificación con símbolo se envía desde execute_decision
+            logger.warning(f"Sin fondos suficientes: ${balance.operable:.2f} disponible, mínimo ${balance.min_trade_amount:.2f}")
             return None
-
         return balance
 
-    async def execute_decision(
-        self,
-        decision: TradeDecision,
-        balance: BalanceInfo
-    ) -> Optional[OrderResult]:
+    async def execute_decision(self, decision, balance):
         if not decision.should_trade:
             logger.info(f"Claude decidió no operar: {decision.reason_not_trade}")
             return None
 
-        # ── Verificar que no hay posición abierta del mismo par en Binance ─
+        # Verificar posición abierta del mismo par en Binance
         try:
             positions = await self.exchange.fetch_positions()
             for p in positions:
@@ -176,65 +132,40 @@ class TradingExecutor:
                     base = sym.split("/")[0] if "/" in sym else sym
                     binance_symbol = base + "USDT"
                     if binance_symbol == decision.symbol:
-                        logger.info(
-                            f"Par {decision.symbol} ya tiene posición abierta en Binance — saltando"
-                        )
+                        logger.info(f"Par {decision.symbol} ya tiene posición abierta en Binance — saltando")
                         return None
         except Exception as e:
             logger.warning(f"No se pudo verificar posiciones en Binance: {e}")
-        # ──────────────────────────────────────────────────────────────────
 
-        # ── Sin fondos suficientes — notificar con símbolo ──────────────
         if not balance.has_sufficient_funds:
             if self.notifications_enabled:
                 self.notifier.notify_skipped(
-                    symbol=decision.symbol,
-                    direction=decision.direction,
+                    symbol=decision.symbol, direction=decision.direction,
                     score=getattr(decision, "score", 0.0),
                     reason=f"Saldo operable ${balance.operable:.2f} < mínimo ${balance.min_trade_amount:.2f} USDT",
-                    usdt_total=balance.usdt_total,
-                    margin_in_use=balance.margin_in_use,
-                    reserve=balance.reserve,
-                    operable=balance.operable,
+                    usdt_total=balance.usdt_total, margin_in_use=balance.margin_in_use,
+                    reserve=balance.reserve, operable=balance.operable,
                 )
             return None
 
-        # ── Control de capital comprometido ───────────────────────────────
         capital_disponible = self.available_capital(balance)
         if capital_disponible < MIN_TRADE_AMOUNT_USD:
-            logger.warning(
-                f"Capital disponible: ${capital_disponible:.2f} — "
-                f"comprometido: ${self._committed_usd:.2f}. Saltando {decision.symbol}."
-            )
+            logger.warning(f"Capital disponible: ${capital_disponible:.2f} — comprometido: ${self._committed_usd:.2f}. Saltando {decision.symbol}.")
             return None
 
-        # ── Calcular tamaño de posición con Fixed Fractional / ATR ────────
-        decision.amount_usd = self._calculate_position_size(
-            decision, balance, capital_disponible
-        )
-
-        # Nunca superar el capital disponible
+        decision.amount_usd = self._calculate_position_size(decision, balance, capital_disponible)
         decision.amount_usd = min(decision.amount_usd, capital_disponible)
-
-        # Subir al mínimo si quedó por debajo
         if decision.amount_usd < MIN_TRADE_AMOUNT_USD:
             if balance.operable >= MIN_TRADE_AMOUNT_USD:
-                logger.info(
-                    f"Monto ajustado de ${decision.amount_usd:.2f} "
-                    f"al mínimo de ${MIN_TRADE_AMOUNT_USD:.2f}"
-                )
+                logger.info(f"Monto ajustado de ${decision.amount_usd:.2f} al mínimo de ${MIN_TRADE_AMOUNT_USD:.2f}")
                 decision.amount_usd = MIN_TRADE_AMOUNT_USD
             else:
-                logger.warning(
-                    f"Capital insuficiente para el mínimo — saltando {decision.symbol}"
-                )
+                logger.warning(f"Capital insuficiente para el mínimo — saltando {decision.symbol}")
                 return None
 
         logger.warning(
             f"Monto final: ${decision.amount_usd:.2f} "
-            f"(operable: ${balance.operable:.2f}, "
-            f"comprometido: ${self._committed_usd:.2f}, "
-            f"disponible: ${capital_disponible:.2f})"
+            f"(operable: ${balance.operable:.2f}, comprometido: ${self._committed_usd:.2f}, disponible: ${capital_disponible:.2f})"
         )
 
         if decision.is_autonomous:
@@ -242,50 +173,29 @@ class TradingExecutor:
         else:
             return await self._execute_with_vobo(decision, balance)
 
-    async def _execute_autonomous(
-        self,
-        decision: TradeDecision,
-        balance: BalanceInfo
-    ) -> Optional[OrderResult]:
-        logger.info(
-            f"Ejecutando operacion autonoma: {decision.symbol} "
-            f"{decision.direction.upper()} ${decision.amount_usd:.2f}"
-        )
-
+    async def _execute_autonomous(self, decision, balance):
+        logger.info(f"Ejecutando operacion autonoma: {decision.symbol} {decision.direction.upper()} ${decision.amount_usd:.2f}")
         result = await self.order_executor.execute(decision)
-
         if result.success:
             self.commit_capital(decision.amount_usd)
-            # Notificar con precio REAL de ejecución y balance refrescado
             if self.notifications_enabled and os.getenv("NOTIFY_ON_ENTRY", "true") == "true":
-                # Refrescar balance para mostrar margen actualizado post-apertura
                 fresh_balance = await self.balance_checker.get_balance()
                 bal = fresh_balance if fresh_balance else balance
                 self.notifier.notify_trade_opened(
-                    symbol=decision.symbol,
-                    direction=decision.direction,
-                    amount_usd=decision.amount_usd,
-                    entry_price=result.entry_price,
-                    stop_loss=decision.stop_loss,
-                    take_profit=decision.take_profit,
-                    leverage=decision.leverage,
-                    reasoning=decision.reasoning,
-                    account_balance=bal.usdt_free,
-                    trade_amount=decision.amount_usd,
-                    usdt_total=bal.usdt_total,
-                    margin_in_use=bal.margin_in_use,
-                    reserve=bal.reserve,
-                    operable=bal.operable,
+                    symbol=decision.symbol, direction=decision.direction,
+                    amount_usd=decision.amount_usd, entry_price=result.entry_price,
+                    stop_loss=decision.stop_loss, take_profit=decision.take_profit,
+                    leverage=decision.leverage, reasoning=decision.reasoning,
+                    account_balance=bal.usdt_free, trade_amount=decision.amount_usd,
+                    usdt_total=bal.usdt_total, margin_in_use=bal.margin_in_use,
+                    reserve=bal.reserve, operable=bal.operable,
                 )
             self._daily_trades.append({
-                "symbol":      decision.symbol,
-                "direction":   decision.direction,
-                "amount":      decision.amount_usd,
-                "entry_price": result.entry_price,
-                "opened_at":   datetime.now(timezone.utc)
+                "symbol": decision.symbol, "direction": decision.direction,
+                "amount": decision.amount_usd, "entry_price": result.entry_price,
+                "opened_at": datetime.now(timezone.utc)
             })
             logger.info(f"Operacion abierta exitosamente: {result.order_id}")
-
             if result.error_msg:
                 if self.notifications_enabled:
                     self.notifier.notify_critical_error(
@@ -297,81 +207,46 @@ class TradingExecutor:
             if self.notifications_enabled:
                 error_msg = result.error_msg or ""
                 if "mínimo de binance" in error_msg.lower() or "min_cost" in error_msg.lower() or "menor al mínimo" in error_msg.lower():
-                    # Extraer monto mínimo del mensaje de error
                     try:
                         min_req = float(error_msg.split("$")[2].split(")")[0])
                     except Exception:
                         min_req = 0.0
                     self.notifier.notify_skipped(
-                        symbol=decision.symbol,
-                        direction=decision.direction,
+                        symbol=decision.symbol, direction=decision.direction,
                         score=getattr(decision, "score", 0.0),
                         reason=f"Mínimo de Binance ${min_req:.2f} > saldo operable ${balance.operable:.2f} USDT",
-                        min_required=min_req,
-                        usdt_total=balance.usdt_total,
-                        margin_in_use=balance.margin_in_use,
-                        reserve=balance.reserve,
-                        operable=balance.operable,
+                        usdt_total=balance.usdt_total, margin_in_use=balance.margin_in_use,
+                        reserve=balance.reserve, operable=balance.operable,
                     )
                 else:
-                    self.notifier.notify_critical_error(
-                        f"Error al ejecutar orden {decision.symbol}: {result.error_msg}"
-                    )
-
+                    self.notifier.notify_critical_error(f"Error al ejecutar orden {decision.symbol}: {result.error_msg}")
         return result
 
-    async def _execute_with_vobo(
-        self,
-        decision: TradeDecision,
-        balance: BalanceInfo
-    ) -> Optional[OrderResult]:
-        logger.info(
-            f"Solicitando VoBo para: {decision.symbol} "
-            f"{decision.direction.upper()} ${decision.amount_usd:.2f}"
-        )
-
+    async def _execute_with_vobo(self, decision, balance):
+        logger.info(f"Solicitando VoBo para: {decision.symbol} {decision.direction.upper()} ${decision.amount_usd:.2f}")
         if self.notifications_enabled:
             self.notifier.notify_vobo_request(
-                symbol=decision.symbol,
-                direction=decision.direction,
-                amount_usd=decision.amount_usd,
-                entry_price=decision.stop_loss,
-                stop_loss=decision.stop_loss,
-                take_profit=decision.take_profit,
-                leverage=decision.leverage,
-                reasoning=decision.reasoning,
-                timeout_min=self.vobo_timeout_min,
-                account_balance=balance.usdt_free,
+                symbol=decision.symbol, direction=decision.direction,
+                amount_usd=decision.amount_usd, entry_price=decision.stop_loss,
+                stop_loss=decision.stop_loss, take_profit=decision.take_profit,
+                leverage=decision.leverage, reasoning=decision.reasoning,
+                timeout_min=self.vobo_timeout_min, account_balance=balance.usdt_free,
                 trade_amount=decision.amount_usd
             )
-
         logger.info(f"VoBo enviado — esperando respuesta por {self.vobo_timeout_min} min")
         return None
 
     async def notify_trade_closed(
-        self,
-        symbol: str,
-        direction: str,
-        pnl_usd: float,
-        pnl_pct: float,
-        duration_min: int,
-        close_reason: str,
-        amount_usd: float = 0.0,
-        entry_price: float = 0.0,
-        exit_price: float = 0.0,
+        self, symbol, direction, pnl_usd, pnl_pct,
+        duration_min, close_reason, amount_usd=0.0,
+        entry_price=0.0, exit_price=0.0,
     ):
         if amount_usd > 0:
             self.release_capital(amount_usd)
-
-        # Registrar cierre en _daily_trades para el reporte periódico
         self._daily_trades.append({
-            "symbol":    symbol,
-            "direction": direction,
-            "pnl_usd":   pnl_usd,
-            "pnl_pct":   pnl_pct,
-            "closed":    True,
+            "symbol": symbol, "direction": direction,
+            "pnl_usd": pnl_usd, "pnl_pct": pnl_pct, "closed": True,
         })
-
         if self.notifications_enabled and os.getenv("NOTIFY_ON_EXIT", "true") == "true":
             fresh_balance = await self.balance_checker.get_balance()
             bal = fresh_balance
@@ -387,19 +262,30 @@ class TradingExecutor:
                 operable=bal.operable if bal else 0.0,
             )
 
-    async def send_daily_report(self, current_balance: float, open_positions: list = None):
+    async def send_daily_report(self, current_balance, open_positions=None):
+        """
+        v0.7.2: Reporte corregido.
+        Muestra posiciones abiertas actuales + cerradas en el periodo.
+        """
         if not self.notifications_enabled:
             return
+
         starting = self._daily_starting_balance or current_balance
-        # Usar BD para contar trades del día — no _daily_trades que se resetea al reiniciar
+
+        # Contar posiciones abiertas
+        open_count = len(open_positions) if open_positions else 0
+
+        # Trades cerrados del periodo desde BD
         total_trades   = 0
         winning_trades = 0
         losing_trades  = 0
         total_pnl      = 0.0
         win_rate       = 0.0
+        closed_tp      = 0
+        closed_sl      = 0
+
         try:
             if hasattr(self, 'db') and self.db:
-                from datetime import datetime
                 today = datetime.now().strftime("%Y-%m-%d")
                 summary = self.db.get_daily_summary(today)
                 total_trades   = summary.get("total_trades", 0)
@@ -407,14 +293,18 @@ class TradingExecutor:
                 losing_trades  = summary.get("losing_trades", 0)
                 total_pnl      = summary.get("total_pnl_usd", 0.0)
                 win_rate       = summary.get("win_rate", 0.0)
+                closed_tp      = winning_trades
+                closed_sl      = losing_trades
         except Exception:
-            # Fallback a _daily_trades si BD no disponible
             closed_trades  = [t for t in self._daily_trades if t.get("closed")]
             total_trades   = len(closed_trades)
             winning_trades = len([t for t in closed_trades if t.get("pnl_usd", 0) > 0])
             losing_trades  = len([t for t in closed_trades if t.get("pnl_usd", 0) <= 0])
             win_rate       = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
             total_pnl      = sum(t.get("pnl_usd", 0) for t in closed_trades)
+            closed_tp      = winning_trades
+            closed_sl      = losing_trades
+
         self.notifier.notify_daily_report(
             date=datetime.now().strftime("%d/%m/%Y"),
             total_trades=total_trades,
@@ -424,14 +314,19 @@ class TradingExecutor:
             win_rate=win_rate,
             starting_balance=starting,
             ending_balance=current_balance,
-            open_positions=open_positions or []
+            open_positions=open_positions or [],
+            open_count=open_count,
+            closed_in_period=total_trades,
+            closed_tp=closed_tp,
+            closed_sl=closed_sl,
         )
+
         self._daily_starting_balance = None
         self._daily_trades = []
         self._last_alert_level = None
         self._committed_usd = 0.0
 
-    async def _check_capital_alerts(self, balance: BalanceInfo):
+    async def _check_capital_alerts(self, balance):
         if not self._daily_starting_balance:
             return
         pct_remaining = balance.usdt_free / self._daily_starting_balance
@@ -446,8 +341,7 @@ class TradingExecutor:
             self._last_alert_level = new_level
             if self.notifications_enabled:
                 self.notifier.notify_capital_alert(
-                    level=new_level,
-                    current_balance=balance.usdt_free,
+                    level=new_level, current_balance=balance.usdt_free,
                     initial_balance=self._daily_starting_balance,
                     pct_remaining=pct_remaining * 100
                 )

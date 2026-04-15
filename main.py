@@ -48,7 +48,7 @@ class TradingAgent:
         self.scheduler = AsyncIOScheduler(timezone=DAILY_REPORT_TZ)
         self.running   = False
         self.learning_engine = None
-        logger.info("TradingAgent v0.7.1 inicializado")
+        logger.info("TradingAgent v0.7.2 inicializado")
 
     async def initialize(self):
         logger.info("Inicializando agente...")
@@ -105,21 +105,26 @@ class TradingAgent:
                 logger.info("Sin señales válidas en este ciclo")
                 return
             logger.info(f"{len(analysis.signals)} señal(es) detectada(s)")
+            # v0.7.2: Guardar symbol+direction para permitir dirección opuesta
             try:
                 raw_pos = await self.collector.binance.exchange.fetch_positions()
-                open_symbols_binance = set()
+                open_positions_binance = set()
                 for p in raw_pos:
                     if p.get("contracts") and float(p["contracts"]) > 0:
                         sym = p["symbol"]
                         base = sym.split("/")[0] if "/" in sym else sym
-                        open_symbols_binance.add(base + "USDT")
+                        pair = base + "USDT"
+                        contracts = float(p.get("contracts", 0))
+                        direction = "long" if contracts > 0 else "short"
+                        open_positions_binance.add(f"{pair}_{direction}")
             except Exception:
-                open_symbols_binance = set()
+                open_positions_binance = set()
             for sig in analysis.signals[:3]:
                 if open_trades >= max_trades:
                     break
-                if sig.symbol in open_symbols_binance:
-                    logger.info(f"Saltando {sig.symbol} — ya hay posición abierta en Binance")
+                sig_key = f"{sig.symbol}_{sig.direction}"
+                if sig_key in open_positions_binance:
+                    logger.info(f"Saltando {sig.symbol} {sig.direction} — ya hay posición en misma dirección")
                     continue
                 await self.process_signal(sig, balance, snapshot)
                 open_trades += 1
@@ -129,6 +134,43 @@ class TradingAgent:
                 self.executor.notifier.notify_critical_error(str(e))
         finally:
             duration = (datetime.now() - cycle_start).total_seconds()
+            # v0.7.2: Registrar cycle_summary
+            try:
+                btc_price = 0.0
+                btc_dom = 0.0
+                fg = 0
+                regime_str = None
+                balance_total = 0.0
+                patterns_count = 0
+                signals_count = 0
+                trades_count = 0
+                symbols_count = 0
+
+                if 'snapshot' in dir() and snapshot:
+                    btc_price = snapshot.market_context.btc_price if hasattr(snapshot.market_context, 'btc_price') else 0
+                    btc_dom = snapshot.market_context.btc_dominance if hasattr(snapshot.market_context, 'btc_dominance') else 0
+                    fg = snapshot.market_context.fear_greed_index if hasattr(snapshot.market_context, 'fear_greed_index') else 0
+                if 'analysis' in dir() and analysis:
+                    signals_count = len(analysis.signals)
+                    symbols_count = analysis.analyzed_symbols
+                if 'balance' in dir() and balance:
+                    balance_total = balance.usdt_total
+
+                self.db.record_cycle_summary({
+                    "symbols_analyzed": symbols_count,
+                    "patterns_detected": patterns_count,
+                    "signals_generated": signals_count,
+                    "trades_opened": trades_count,
+                    "regime": regime_str,
+                    "fear_greed": fg,
+                    "btc_price": btc_price,
+                    "btc_dominance": btc_dom,
+                    "total_balance": balance_total,
+                    "cycle_duration_sec": duration,
+                })
+            except Exception as e2:
+                logger.debug(f"Error registrando cycle_summary: {e2}")
+
             logger.info(f"─── Ciclo completado en {duration:.1f}s ───")
 
     async def process_signal(self, signal: TradingSignal, balance, snapshot):
@@ -375,7 +417,7 @@ class TradingAgent:
                 self.executor.notifier.notify_agent_started(balance=balance.usdt_total, operable=balance.operable, margin_in_use=balance.margin_in_use, reserve=balance.reserve)
         except Exception as e:
             logger.error(f"Error enviando mensaje de inicio: {e}")
-        logger.info(f"Agente v0.7.1 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
+        logger.info(f"Agente v0.7.2 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
         while self.running:
             await self.run_cycle()
             await asyncio.sleep(LOOP_INTERVAL_MIN * 60)
