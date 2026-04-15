@@ -266,19 +266,17 @@ class MTFAligner:
         else:
             alignment_score = -20
 
-        # ── MEJOR PATRÓN (priorizar TFs altos) ──────────────────────────
+        # ── MEJOR PATRÓN (priorizar TFs altos, pero validar targets) ─────
         best_pattern = None
         best_breakout = None
 
-        # Primero buscar en TFs altos (1D, 4h), luego en bajos
+        # Primero buscar en TFs altos, luego en bajos
         for tf in TOP_DOWN_ORDER:
             analysis = tf_analyses.get(tf)
             if not analysis or not analysis.best_pattern:
                 continue
-            # Solo considerar patrones alineados con el consenso
             if analysis.best_pattern.direction == consensus or consensus == "neutral":
                 if best_pattern is None or (
-                    # Preferir TF alto con confianza razonable sobre TF bajo con confianza alta
                     analysis.weight > TF_CONFIG.get(best_pattern.timeframe, {}).get("weight", 0) and
                     analysis.best_pattern.confidence >= 40
                 ):
@@ -293,6 +291,34 @@ class MTFAligner:
             best_targets = self.target_calculator.calculate(
                 best_pattern, best_breakout, tp_mult, sl_mult
             )
+
+            # v0.7.2: Si targets son inválidos, buscar patrón de TF más bajo
+            if best_targets and not best_targets.is_valid_setup:
+                logger.info(
+                    f"{symbol} — Targets de {best_pattern.pattern_type}({best_pattern.timeframe}) "
+                    f"inválidos ({best_targets.tp_method}). Buscando TF alternativo..."
+                )
+                for tf in reversed(TOP_DOWN_ORDER):
+                    if tf == best_pattern.timeframe:
+                        continue
+                    analysis = tf_analyses.get(tf)
+                    if not analysis or not analysis.best_pattern:
+                        continue
+                    if analysis.best_pattern.direction == consensus or consensus == "neutral":
+                        alt_targets = self.target_calculator.calculate(
+                            analysis.best_pattern,
+                            analysis.best_breakout,
+                            tp_mult, sl_mult
+                        )
+                        if alt_targets and alt_targets.is_valid_setup:
+                            logger.info(
+                                f"{symbol} — Usando targets de {analysis.best_pattern.pattern_type}"
+                                f"({tf}) en vez de {best_pattern.timeframe}"
+                            )
+                            best_targets = alt_targets
+                            # Mantener best_pattern del TF alto para scoring,
+                            # pero usar targets del TF bajo
+                            break
 
         result = MTFAlignment(
             aligned=aligned,
