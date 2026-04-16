@@ -456,7 +456,8 @@ class TradingAgent:
         try:
             balance = await self.executor.check_balance()
             if balance and self.executor.notifications_enabled:
-                self.executor.notifier.notify_agent_started(balance=balance.usdt_total, operable=balance.operable, margin_in_use=balance.margin_in_use, reserve=balance.reserve)
+                from collector.models import FUTURES_SYMBOLS
+                self.executor.notifier.notify_agent_started(balance=balance.usdt_total, operable=balance.operable, margin_in_use=balance.margin_in_use, reserve=balance.reserve, symbols=FUTURES_SYMBOLS)
         except Exception as e:
             logger.error(f"Error enviando mensaje de inicio: {e}")
         logger.info(f"Agente v0.7.2 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")

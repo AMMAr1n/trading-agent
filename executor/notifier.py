@@ -406,8 +406,14 @@ class TelegramNotifier:
         )
 
     def notify_agent_started(
-        self, balance=0.0, operable=0.0, margin_in_use=0.0, reserve=0.0
+        self, balance=0.0, operable=0.0, margin_in_use=0.0, reserve=0.0,
+        symbols=None,
     ) -> bool:
+        if symbols:
+            names = [s.replace("USDT", "") for s in symbols]
+            symbols_line = f"Monitoreando: {', '.join(names)} ({len(names)} pares)"
+        else:
+            symbols_line = "Monitoreando activos configurados"
         return self.send(
             f"🤖 <b>AGENTE INICIADO</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -416,7 +422,7 @@ class TelegramNotifier:
             f"🏦 Reserva: <b>${reserve:.2f} USDT</b>\n"
             f"✅ Saldo operable: <b>${operable:.2f} USDT</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"Monitoreando: BTC, ETH, SOL, BNB, DOGE, XRP, ADA\n"
+            f"{symbols_line}\n"
             f"Te notificaré cada operación. 📱"
         )
 
