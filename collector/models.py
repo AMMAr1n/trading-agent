@@ -12,7 +12,11 @@ from pydantic import BaseModel, field_validator
 # ─── ACTIVOS DEL PORTAFOLIO ────────────────────────────────────────────────────
 
 # Futuros perpetuos USD-M — todos los pares, LONG y SHORT
-FUTURES_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "XRPUSDT", "ADAUSDT"]
+FUTURES_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "XRPUSDT", "ADAUSDT",
+    "AVAXUSDT", "DOTUSDT", "LINKUSDT", "LTCUSDT", "NEARUSDT", "TRUMPUSDT", "AAVEUSDT",
+    "SUIUSDT",
+]
 
 # Spot — deshabilitado, todos operan como futuros perpetuos
 SPOT_TIER1 = []
