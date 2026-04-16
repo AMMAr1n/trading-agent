@@ -59,10 +59,15 @@ class PositionMonitor:
                 if p.get("contracts") and float(p["contracts"]) > 0
             }
 
-            open_orders   = await self.exchange.fetch_open_orders()
+            # Obtener órdenes abiertas POR SÍMBOLO (no global — Binance penaliza)
             orders_by_sym = {}
-            for o in open_orders:
-                orders_by_sym.setdefault(o["symbol"], []).append(o["type"].lower())
+            for symbol in list(self._tracked.keys()):
+                try:
+                    sym_orders = await self.exchange.fetch_open_orders(symbol)
+                    for o in sym_orders:
+                        orders_by_sym.setdefault(o["symbol"], []).append(o["type"].lower())
+                except Exception:
+                    pass  # Si falla un símbolo, continuar con los demás
 
             symbols_to_remove = []
 
