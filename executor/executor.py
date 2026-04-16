@@ -1,6 +1,6 @@
 """
 executor.py — Orquestador principal del executor
-v0.7.2 — Fix reporte periódico con posiciones abiertas y cerradas del periodo.
+v0.7.2 — RISK_PCT dinámico por etapa del agente.
 """
 
 import logging
@@ -19,8 +19,25 @@ from .order_executor import OrderExecutor, OrderResult
 load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
-RISK_PCT = float(os.getenv("RISK_PCT", "1.0")) / 100
+# RISK_PCT ahora se lee dinámicamente desde la etapa del agente
+# El .env sirve como fallback si no hay etapa configurada
+RISK_PCT_FALLBACK = float(os.getenv("RISK_PCT", "2.0")) / 100
 ATR_MULTIPLIER = float(os.getenv("ATR_MULTIPLIER", "1.5"))
+
+# Risk por etapa (debe coincidir con learning.py STAGES)
+STAGE_RISK_PCT = {
+    1: 2.0,   # Aprendiz
+    2: 3.0,   # Practicante
+    3: 4.0,   # Competente
+    4: 5.0,   # Experto
+}
+
+
+def get_risk_pct() -> float:
+    """Lee el RISK_PCT dinámico basado en AGENT_STAGE del .env."""
+    stage = int(os.getenv("AGENT_STAGE", "1"))
+    pct = STAGE_RISK_PCT.get(stage, 2.0)
+    return pct / 100
 
 
 class TradingExecutor:
@@ -59,7 +76,7 @@ class TradingExecutor:
             f"Modo: {'TESTNET' if testnet else 'PRODUCCION'} | "
             f"Notificaciones: {'ON' if self.notifications_enabled else 'OFF'} | "
             f"Capital máximo simultáneo: {self.max_capital_pct*100:.0f}% | "
-            f"Riesgo por trade: {RISK_PCT*100:.1f}%"
+            f"Riesgo por trade: {get_risk_pct()*100:.1f}% (Stage {os.getenv('AGENT_STAGE', '1')})"
         )
 
     def commit_capital(self, amount_usd: float):
@@ -75,7 +92,8 @@ class TradingExecutor:
         return max(0.0, max_allowed - self._committed_usd)
 
     def _calculate_position_size(self, decision, balance, capital_disponible):
-        dollar_risk = balance.operable * RISK_PCT
+        risk_pct = get_risk_pct()
+        dollar_risk = balance.operable * risk_pct
         atr = getattr(decision, 'atr_14', 0.0) or 0.0
         if atr > 0 and decision.stop_loss > 0:
             stop_distance = atr * ATR_MULTIPLIER
@@ -86,7 +104,7 @@ class TradingExecutor:
                 logger.info(
                     f"ATR sizing: ATR={atr:.4f} | "
                     f"Stop dist={stop_distance:.4f} ({ATR_MULTIPLIER}x ATR) | "
-                    f"Dollar risk=${dollar_risk:.2f} ({RISK_PCT*100:.1f}%) | "
+                    f"Dollar risk=${dollar_risk:.2f} ({risk_pct*100:.1f}%) | "
                     f"Monto ATR=${amount_atr:.2f}"
                 )
                 return amount_atr
@@ -305,6 +323,11 @@ class TradingExecutor:
             closed_tp      = winning_trades
             closed_sl      = losing_trades
 
+        # Obtener etapa actual
+        stage = int(os.getenv("AGENT_STAGE", "1"))
+        stage_names = {1: "Aprendiz", 2: "Practicante", 3: "Competente", 4: "Experto"}
+        stage_name = stage_names.get(stage, "Aprendiz")
+
         self.notifier.notify_daily_report(
             date=datetime.now().strftime("%d/%m/%Y"),
             total_trades=total_trades,
@@ -319,6 +342,7 @@ class TradingExecutor:
             closed_in_period=total_trades,
             closed_tp=closed_tp,
             closed_sl=closed_sl,
+            stage_name=stage_name,
         )
 
         self._daily_starting_balance = None

@@ -304,7 +304,7 @@ class TelegramNotifier:
         total_pnl, win_rate, starting_balance, ending_balance,
         open_positions=None, period_label="",
         open_count=0, closed_in_period=0,
-        closed_tp=0, closed_sl=0,
+        closed_tp=0, closed_sl=0, stage_name="",
     ) -> bool:
         """
         v0.7.2: Reporte periódico corregido.
@@ -370,11 +370,15 @@ class TelegramNotifier:
                     f"❌ SL: ${sl:,.4f} (-{dist_sl_pct:.1f}% / -${dist_sl_usd:.2f})"
                 )
 
+        # Línea de etapa
+        stage_line = f"🎓 Etapa: <b>{stage_name}</b>" if stage_name else ""
+
         return self.send(
             f"📊 <b>{period_label} — {date}</b>\n"
             f"{emoji} P&L del periodo: <b>{'+' if total_pnl >= 0 else ''}${total_pnl:.2f} USD</b>\n"
             f"{ops_line}\n"
-            f"Saldo: ${starting_balance:.2f} → <b>${ending_balance:.2f} USD</b> ({sign}${balance_change:.2f})"
+            f"Saldo: ${starting_balance:.2f} → <b>${ending_balance:.2f} USD</b> ({sign}${balance_change:.2f})\n"
+            f"{stage_line}"
             f"{positions_section}\n"
             f"¡Hasta el próximo reporte! 🚀"
         )

@@ -22,9 +22,29 @@ from .indicators import TechnicalIndicators
 from .levels import SupportResistanceResult
 
 load_dotenv(override=False)
-MIN_SCORE = int(os.getenv("MIN_SCORE", "30"))
 
 logger = logging.getLogger(__name__)
+
+# MIN_SCORE y leverage ahora se leen dinámicamente de la etapa
+STAGE_CONFIG = {
+    1: {"min_score": 50, "max_leverage": "1x"},
+    2: {"min_score": 45, "max_leverage": "2x"},
+    3: {"min_score": 42, "max_leverage": "3x"},
+    4: {"min_score": 40, "max_leverage": "5x"},
+}
+
+
+def get_stage_config():
+    stage = int(os.getenv("AGENT_STAGE", "1"))
+    return STAGE_CONFIG.get(stage, STAGE_CONFIG[1])
+
+
+def get_min_score():
+    return get_stage_config()["min_score"]
+
+
+def get_max_leverage():
+    return get_stage_config()["max_leverage"]
 
 WEIGHTS = {
     "ema_trend":       20,
@@ -74,14 +94,17 @@ class ScoreBreakdown:
 
     @property
     def is_tradeable(self) -> bool:
-        return self.total >= MIN_SCORE and self.direction != "neutral"
+        return self.total >= get_min_score() and self.direction != "neutral"
 
     @property
     def leverage_recommended(self) -> str:
-        if self.total >= 75:
-            return "3x"
-        elif self.total >= 60:
-            return "2x"
+        max_lev = get_max_leverage()
+        max_num = int(max_lev.replace("x", ""))
+        # Dentro del límite de la etapa, escalar por score
+        if self.total >= 75 and max_num >= 3:
+            return f"{min(3, max_num)}x"
+        elif self.total >= 60 and max_num >= 2:
+            return f"{min(2, max_num)}x"
         return "1x"
 
 

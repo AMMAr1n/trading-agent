@@ -28,10 +28,10 @@ from scipy import stats as scipy_stats
 logger = logging.getLogger(__name__)
 
 STAGES = {
-    1: {"name": "Aprendiz",     "min_trades": 0,   "max_leverage": "1x",  "min_score": 50,  "min_rr": 2.0},
-    2: {"name": "Practicante",  "min_trades": 20,  "max_leverage": "2x",  "min_score": 45,  "min_rr": 1.8},
-    3: {"name": "Competente",   "min_trades": 50,  "max_leverage": "3x",  "min_score": 42,  "min_rr": 1.5},
-    4: {"name": "Experto",      "min_trades": 100, "max_leverage": "5x",  "min_score": 40,  "min_rr": 1.3},
+    1: {"name": "Aprendiz",     "min_trades": 0,   "max_leverage": "1x",  "min_score": 50,  "min_rr": 2.0, "risk_pct": 2.0},
+    2: {"name": "Practicante",  "min_trades": 20,  "max_leverage": "2x",  "min_score": 45,  "min_rr": 1.8, "risk_pct": 3.0},
+    3: {"name": "Competente",   "min_trades": 50,  "max_leverage": "3x",  "min_score": 42,  "min_rr": 1.5, "risk_pct": 4.0},
+    4: {"name": "Experto",      "min_trades": 100, "max_leverage": "5x",  "min_score": 40,  "min_rr": 1.3, "risk_pct": 5.0},
 }
 
 ADVANCE_CRITERIA = {
@@ -122,7 +122,8 @@ class LearningContext:
         lines.append(
             f"  Leverage máximo: {cfg['max_leverage']} | "
             f"MIN_SCORE: {cfg['min_score']} | "
-            f"R:R mínimo: {cfg['min_rr']}:1"
+            f"R:R mínimo: {cfg['min_rr']}:1 | "
+            f"Riesgo por trade: {cfg.get('risk_pct', 2.0)}%"
         )
         lines.append("")
 
@@ -437,6 +438,40 @@ class LearningEngine:
 
         return can_advance, should_retreat, progress
 
+    def _update_stage_in_env(self, new_stage: int):
+        """Actualiza AGENT_STAGE en el archivo .env automáticamente."""
+        try:
+            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+            if not os.path.exists(env_path):
+                logger.warning(f"No se encontró .env en {env_path}")
+                return False
+
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+
+            found = False
+            new_lines = []
+            for line in lines:
+                if line.strip().startswith("AGENT_STAGE="):
+                    new_lines.append(f"AGENT_STAGE={new_stage}\n")
+                    found = True
+                else:
+                    new_lines.append(line)
+
+            if not found:
+                new_lines.append(f"AGENT_STAGE={new_stage}\n")
+
+            with open(env_path, "w") as f:
+                f.writelines(new_lines)
+
+            self.current_stage = new_stage
+            os.environ["AGENT_STAGE"] = str(new_stage)
+            logger.info(f"AGENT_STAGE actualizado a {new_stage} en .env")
+            return True
+        except Exception as e:
+            logger.error(f"Error actualizando AGENT_STAGE en .env: {e}")
+            return False
+
     def get_context(self):
         trades = self._get_closed_trades(200)
         total = len(trades)
@@ -454,6 +489,24 @@ class LearningEngine:
         biases = self._detect_biases(trades)
         adaptive_rules = self._generate_adaptive_rules(trades, pattern_stats, biases)
         can_advance, should_retreat, progress = self._evaluate_stage(trades)
+
+        # ── AVANCE/RETROCESO AUTOMÁTICO ──────────────────────────────────
+        if can_advance and self.current_stage < 4:
+            new_stage = self.current_stage + 1
+            old_name = STAGES[self.current_stage]["name"]
+            new_name = STAGES[new_stage]["name"]
+            if self._update_stage_in_env(new_stage):
+                logger.info(f"🎓 AVANCE DE ETAPA: {old_name} → {new_name}")
+                progress = f"✅ AVANZÓ a {new_name}"
+
+        if should_retreat and self.current_stage > 1:
+            new_stage = self.current_stage - 1
+            old_name = STAGES[self.current_stage]["name"]
+            new_name = STAGES[new_stage]["name"]
+            if self._update_stage_in_env(new_stage):
+                logger.warning(f"⚠️ RETROCESO DE ETAPA: {old_name} → {new_name}")
+                progress = f"⚠️ RETROCEDIÓ a {new_name}"
+        # ─────────────────────────────────────────────────────────────────
 
         good = [ps.pattern_type for ps in pattern_stats if ps.win_rate >= 60 and ps.total_trades >= 3]
         bad = [ps.pattern_type for ps in pattern_stats if ps.win_rate < 40 and ps.total_trades >= 3]
@@ -485,6 +538,7 @@ class LearningEngine:
             f"Learning context: Stage {self.current_stage} ({stage_config['name']}) | "
             f"{total} trades | WR: {wr:.0f}% | PF: {pf:.1f}x | "
             f"Validated patterns: {validated_count} | "
+            f"Risk: {stage_config.get('risk_pct', 2.0)}% | "
             f"Advance: {can_advance} | Retreat: {should_retreat}"
         )
 
