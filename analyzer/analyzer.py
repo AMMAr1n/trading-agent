@@ -49,6 +49,10 @@ class TradingSignal:
     levels: SupportResistanceResult
     indicators_1w: Optional[TechnicalIndicators] = None
     mtf_alignment: Optional[MTFAlignment] = None
+    # v0.8.0 — penalty tracking
+    daily_penalty_applied: float = 0.0
+    weekly_penalty_applied: float = 0.0
+    alignment_context: Optional[str] = None
 
     @property
     def is_autonomous(self) -> bool:
@@ -243,20 +247,58 @@ class TechnicalAnalyzer:
             )
             return None
 
-        # ── Modificador 1D — tendencia mayor ───────────────────────────
+        # ── Penalización adaptativa v0.8.0 ─────────────────────────────
+        # En vez de penalizaciones fijas, calcula dinámicamente basado en:
+        # 1. Fuerza de la tendencia diaria (ADX)
+        # 2. Alineación con tendencia semanal
+        # 3. Dirección de la señal vs timeframes mayores
+        daily_penalty = 0.0
+        weekly_penalty = 0.0
+        alignment_parts = []
+
+        BASE_PENALTY = 15.0
+
         if indicators_1d:
             direction_1d = indicators_1d.suggested_direction
             trend_1d = indicators_1d.trend
+            adx_1d = getattr(indicators_1d, 'adx', None) or 0
+
+            alignment_parts.append(f"1d:{trend_1d}")
+            alignment_parts.append(f"adx_1d:{adx_1d:.0f}")
+
             if direction_1d != "neutral" and direction_1d != direction:
-                daily_penalty = 25.0 if "strong" in trend_1d else 15.0
+                # Strength factor: ADX normalizado (0-1.5)
+                if adx_1d > 0:
+                    strength = min(adx_1d / 40.0, 1.5)
+                else:
+                    # Sin ADX, usar el string de tendencia como proxy
+                    strength = 0.8 if "strong" in trend_1d else 0.5
+
+                # Alignment factor: ¿el semanal confirma o contradice?
+                weekly_dir = indicators_1w.suggested_direction if indicators_1w else "neutral"
+                if weekly_dir == direction:
+                    alignment_factor = 0.5   # Semanal a favor → penalty reducida
+                elif weekly_dir == "neutral":
+                    alignment_factor = 1.0   # Semanal neutral → penalty normal
+                else:
+                    alignment_factor = 1.5   # Semanal en contra → penalty amplificada
+
+                daily_penalty = round(BASE_PENALTY * alignment_factor * strength, 1)
                 score_ajustado = score.total - daily_penalty
+
                 if score_ajustado < MIN_SCORE:
                     logger.info(
                         f"{symbol} — Score ajustado por tendencia diaria: "
-                        f"{score.total:.0f} - {daily_penalty:.0f} = {score_ajustado:.0f} — descartada"
+                        f"{score.total:.0f} - {daily_penalty:.0f} = {score_ajustado:.0f} — descartada "
+                        f"(strength:{strength:.2f} align:{alignment_factor:.1f})"
                     )
                     return None
                 score.total = round(score_ajustado, 1)
+                logger.info(
+                    f"{symbol} — Penalty diaria: -{daily_penalty:.1f} "
+                    f"(base:{BASE_PENALTY} × align:{alignment_factor:.1f} × strength:{strength:.2f}) "
+                    f"→ Score: {score.total:.0f}"
+                )
             elif direction_1d == direction:
                 score.total = min(round(score.total + 5, 1), 100.0)
 
@@ -264,8 +306,17 @@ class TechnicalAnalyzer:
         if indicators_1w:
             direction_1w = indicators_1w.suggested_direction
             trend_1w = indicators_1w.trend
+            adx_1w = getattr(indicators_1w, 'adx', None) or 0
+
+            alignment_parts.append(f"1w:{trend_1w}")
+            alignment_parts.append(f"adx_1w:{adx_1w:.0f}")
+
             if direction_1w != "neutral" and direction_1w != direction:
-                weekly_penalty = 15.0 if "strong" in trend_1w else 10.0
+                if adx_1w > 0:
+                    w_strength = min(adx_1w / 40.0, 1.5)
+                else:
+                    w_strength = 0.8 if "strong" in trend_1w else 0.5
+                weekly_penalty = round(10.0 * w_strength, 1)
                 score_1w = score.total - weekly_penalty
                 if score_1w < MIN_SCORE:
                     logger.info(
@@ -276,6 +327,8 @@ class TechnicalAnalyzer:
                 score.total = round(score_1w, 1)
             elif direction_1w == direction:
                 score.total = min(round(score.total + 8, 1), 100.0)
+
+        alignment_context = ",".join(alignment_parts) if alignment_parts else None
 
         # ── Confirmacion 2h ────────────────────────────────────────────
         if indicators_4h:
@@ -305,6 +358,9 @@ class TechnicalAnalyzer:
             indicators_1w=indicators_1w,
             levels=levels,
             mtf_alignment=mtf_alignment,
+            daily_penalty_applied=daily_penalty,
+            weekly_penalty_applied=weekly_penalty,
+            alignment_context=alignment_context,
         )
 
         logger.info(f"Senal detectada: {signal.summary}")

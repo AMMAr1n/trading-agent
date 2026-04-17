@@ -261,12 +261,15 @@ class TradingAgent:
                 fear_greed=snapshot.market_context.fear_greed_index,
                 score_breakdown=score_breakdown, balance_total=balance.usdt_total,
                 balance_reserve=balance.reserve, balance_operable=balance.operable,
-                sl_tp_method="algo_api", version="v0.7.1",
+                sl_tp_method="algo_api", version="v0.8.0",
                 pattern_type=pattern_type, pattern_confidence=pattern_confidence,
                 breakout_quality=breakout_quality, breakout_score=breakout_score_val,
                 regime=regime, regime_adx=regime_adx, projected_rr=projected_rr,
                 mtf_alignment_score=mtf_alignment_score, mtf_consensus=mtf_consensus,
                 agent_stage=agent_stage,
+                daily_penalty_applied=getattr(signal, 'daily_penalty_applied', 0.0),
+                weekly_penalty_applied=getattr(signal, 'weekly_penalty_applied', 0.0),
+                alignment_context=getattr(signal, 'alignment_context', None),
             ))
             logger.info(f"Operación registrada en DB: ID {trade_id}")
             self.monitor.register(
@@ -508,7 +511,7 @@ class TradingAgent:
                 self.executor.notifier.notify_agent_started(balance=balance.usdt_total, operable=balance.operable, margin_in_use=balance.margin_in_use, reserve=balance.reserve, symbols=FUTURES_SYMBOLS)
         except Exception as e:
             logger.error(f"Error enviando mensaje de inicio: {e}")
-        logger.info(f"Agente v0.7.2 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
+        logger.info(f"Agente v0.8.0 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
         while self.running:
             await self.run_cycle()
             await asyncio.sleep(LOOP_INTERVAL_MIN * 60)

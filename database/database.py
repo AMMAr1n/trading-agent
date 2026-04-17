@@ -77,6 +77,10 @@ class TradeRecord:
     mtf_alignment_score: Optional[int] = None
     mtf_consensus: Optional[str] = None
     agent_stage: int = 1
+    # v0.8.0 campos — penalización adaptativa
+    daily_penalty_applied: float = 0.0
+    weekly_penalty_applied: float = 0.0
+    alignment_context: Optional[str] = None
 
 
 @dataclass
@@ -150,6 +154,11 @@ class TradingDatabase:
                 VALUES ('v0.7.2', 'pattern_detections, cycle_summary, SMA50 filter, t-test', '2026-04-15', 'Aprendizaje estructural')
             """)
 
+            cursor.execute("""
+                INSERT OR IGNORE INTO versions (version, description, implemented_at, notes)
+                VALUES ('v0.8.0', 'Penalización adaptativa, campos de penalty en trades', '2026-04-17', 'Sistema de aprendizaje de penalties')
+            """)
+
             # Migración columnas trades
             for col, col_type in [
                 ("volume_ratio", "REAL DEFAULT 0"), ("trend_1h", "TEXT"),
@@ -167,6 +176,10 @@ class TradingDatabase:
                 ("max_favorable_excursion", "REAL"), ("max_adverse_excursion", "REAL"),
                 ("efficiency", "REAL"), ("mtf_alignment_score", "INTEGER"),
                 ("mtf_consensus", "TEXT"), ("agent_stage", "INTEGER DEFAULT 1"),
+                # v0.8.0 columnas
+                ("daily_penalty_applied", "REAL DEFAULT 0"),
+                ("weekly_penalty_applied", "REAL DEFAULT 0"),
+                ("alignment_context", "TEXT"),
             ]:
                 try:
                     cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
@@ -270,11 +283,13 @@ class TradingDatabase:
                     duration_min, sl_tp_method, version,
                     pattern_type, pattern_confidence, breakout_quality,
                     breakout_score, regime, regime_adx, projected_rr,
-                    mtf_alignment_score, mtf_consensus, agent_stage
+                    mtf_alignment_score, mtf_consensus, agent_stage,
+                    daily_penalty_applied, weekly_penalty_applied, alignment_context
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?,
                           ?, ?, ?, ?, ?, ?, ?, ?,
                           ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?)
             """, (
                 trade.symbol, trade.direction, trade.trading_mode,
                 trade.amount_usd, trade.entry_price, trade.stop_loss,
@@ -295,6 +310,9 @@ class TradingDatabase:
                 getattr(trade, 'projected_rr', None),
                 getattr(trade, 'mtf_alignment_score', None), getattr(trade, 'mtf_consensus', None),
                 getattr(trade, 'agent_stage', 1),
+                getattr(trade, 'daily_penalty_applied', 0.0),
+                getattr(trade, 'weekly_penalty_applied', 0.0),
+                getattr(trade, 'alignment_context', None),
             ))
             trade_id = cursor.lastrowid
             logger.info(f"Operación registrada: ID {trade_id} — {trade.symbol} {trade.direction.upper()}")
