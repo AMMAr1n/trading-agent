@@ -220,20 +220,21 @@ class PositionMonitor:
     async def _cancel_algo_orders(self, symbol: str):
         """
         Cancela todas las órdenes condicionales (Algo) abiertas para un símbolo.
-        Se llama cuando una posición se cierra para evitar que el SL/TP
-        huérfano abra una posición contraria involuntaria.
+        Usa order_executor.exchange que tiene los métodos fapiPrivate*.
         """
+        if not self.order_executor:
+            logger.warning(f"PositionMonitor: no hay order_executor para cancelar órdenes de {symbol}")
+            return
         try:
             raw_symbol = symbol.replace("/", "").replace(":USDT", "")
-            # Obtener órdenes algo abiertas para este símbolo
-            algo_orders = await self.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
+            algo_orders = await self.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
             orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
             cancelled = 0
             for order in orders:
                 algo_id = order.get("algoId") or order.get("orderId")
                 if algo_id:
                     try:
-                        await self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
+                        await self.order_executor.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
                         cancelled += 1
                     except Exception as e:
                         logger.warning(f"PositionMonitor: no se pudo cancelar algo order {algo_id}: {e}")
