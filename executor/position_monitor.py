@@ -53,11 +53,15 @@ class PositionMonitor:
 
         try:
             raw_positions = await self.exchange.fetch_positions()
-            open_symbols  = {
-                p["symbol"]
-                for p in raw_positions
-                if p.get("contracts") and float(p["contracts"]) > 0
-            }
+            # Normalizar símbolos: ccxt retorna "XRP/USDT:USDT", nosotros usamos "XRPUSDT"
+            open_symbols = set()
+            for p in raw_positions:
+                if p.get("contracts") and float(p["contracts"]) > 0:
+                    sym = p["symbol"]
+                    # Normalizar: "XRP/USDT:USDT" → "XRPUSDT"
+                    base = sym.split("/")[0] if "/" in sym else sym.replace("USDT", "")
+                    normalized = base + "USDT"
+                    open_symbols.add(normalized)
 
             # Obtener órdenes abiertas POR SÍMBOLO (no global — Binance penaliza)
             orders_by_sym = {}
