@@ -277,7 +277,16 @@ class TradingAgent:
             )
 
     async def _restore_tracked_positions(self):
+        """
+        Sincroniza posiciones entre Binance y BD al iniciar.
+        v0.7.2 fix: 
+        - Usa executor exchange para algo orders (no collector)
+        - Solo cierra en BD trades que NO están en Binance
+        - Compara por entry_price para distinguir trades del mismo símbolo
+        - No envía notificaciones de cierre durante restore
+        """
         try:
+            # 1. Obtener posiciones reales de Binance
             raw_positions = await self.collector.binance.exchange.fetch_positions()
             binance_positions = {}
             for p in raw_positions:
@@ -285,8 +294,15 @@ class TradingAgent:
                     base = p["symbol"].split("/")[0] if "/" in p["symbol"] else p["symbol"].replace("USDT", "")
                     symbol = base + "USDT"
                     binance_positions[symbol] = p
+
             open_in_binance = set(binance_positions.keys())
+            logger.info(f"Restore: Binance tiene {len(open_in_binance)} posiciones: {open_in_binance}")
+
+            # 2. Obtener trades abiertos en BD
             open_trades = self.db.get_open_trades()
+            logger.info(f"Restore: BD tiene {len(open_trades)} trades abiertos")
+
+            # 3. Posiciones en Binance que NO están en BD → sincronizar
             db_symbols = {t["symbol"] for t in open_trades}
             synced = 0
             for symbol, p in binance_positions.items():
@@ -298,22 +314,25 @@ class TradingAgent:
                         leverage = float(p.get("leverage", 1) or 1)
                         amount_usd = abs(notional) / leverage if leverage > 0 else entry_price * contracts
                         direction = "long" if float(p.get("contracts", 0)) > 0 else "short"
+
+                        # Obtener SL/TP usando executor exchange
                         stop_loss = 0.0
                         take_profit = 0.0
                         try:
-                            algo_orders = await self.collector.binance.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": symbol})
-                            orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
+                            raw_sym = symbol.replace("USDT", "")
+                            algo_result = await self.executor.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_sym + "USDT"})
+                            orders = algo_result if isinstance(algo_result, list) else algo_result.get("orders", [])
                             for o in orders:
                                 trigger = float(o.get("triggerPrice", 0) or 0)
                                 order_type = str(o.get("type", "")).lower()
-                                side = str(o.get("side", "")).lower()
                                 if trigger > 0:
-                                    if "stop" in order_type or (side == "sell" and trigger < entry_price):
+                                    if "stop" in order_type:
                                         stop_loss = trigger
-                                    elif "take_profit" in order_type or (side == "sell" and trigger > entry_price):
+                                    elif "take_profit" in order_type:
                                         take_profit = trigger
                         except Exception as e:
-                            logger.warning(f"No se pudo obtener SL/TP para {symbol}: {e}")
+                            logger.warning(f"Restore: no se pudo obtener SL/TP para {symbol}: {e}")
+
                         bal = await self.executor.balance_checker.get_balance()
                         trade_id = self.db.open_trade(TradeRecord(
                             id=None, symbol=symbol, direction=direction, trading_mode="futures",
@@ -327,22 +346,27 @@ class TradingAgent:
                             balance_total=bal.usdt_total if bal else 0,
                             balance_reserve=bal.reserve if bal else 0,
                             balance_operable=bal.operable if bal else 0,
-                            sl_tp_method="algo_api", version="v0.7.1",
+                            sl_tp_method="algo_api", version="v0.7.2",
                         ))
                         open_trades.append({"id": trade_id, "symbol": symbol, "direction": direction,
                                             "entry_price": entry_price, "amount_usd": amount_usd,
                                             "stop_loss": stop_loss, "take_profit": take_profit})
                         synced += 1
-                        logger.info(f"Posición sincronizada: {symbol} | DB ID={trade_id}")
+                        logger.info(f"Restore: {symbol} sincronizada desde Binance | DB ID={trade_id}")
                     except Exception as e:
-                        logger.error(f"Error sincronizando {symbol}: {e}")
+                        logger.error(f"Restore: error sincronizando {symbol}: {e}")
+
+            # 4. Trades abiertos en BD → registrar en monitor o cerrar
             if not open_trades:
-                logger.info("No hay posiciones abiertas para restaurar")
+                logger.info("Restore: no hay posiciones para restaurar")
                 return
+
             restored = 0
             for trade in open_trades:
                 symbol = trade["symbol"]
+
                 if symbol in open_in_binance:
+                    # Posición existe en Binance → registrar en monitor
                     entry_price = trade.get("entry_price", 0) or 0
                     amount_usd = trade.get("amount_usd", 0) or 0
                     quantity = amount_usd / entry_price if entry_price > 0 else 0
@@ -354,78 +378,77 @@ class TradingAgent:
                         amount_usd=amount_usd, trade_id=trade["id"],
                     )
                     restored += 1
+                    logger.info(f"Restore: {symbol} registrada en monitor | DB ID={trade['id']}")
                 else:
-                    # Posición ya no existe en Binance — cerrar en BD
+                    # Posición NO existe en Binance → cerrar en BD silenciosamente
+                    # (sin notificación — el cierre ya pasó antes del reinicio)
+                    logger.info(f"Restore: {symbol} (DB ID={trade['id']}) no está en Binance — cerrando en BD")
 
-                    # Bug 1 fix: Cancelar órdenes huérfanas (SL/TP que quedaron)
+                    # Cancelar órdenes huérfanas usando executor exchange
                     try:
-                        raw_symbol = symbol.replace("/", "").replace(":USDT", "").replace("USDT", "")
-                        raw_symbol = raw_symbol + "USDT"
-                        algo_orders = await self.collector.binance.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
-                        orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
+                        raw_sym = symbol.replace("USDT", "")
+                        algo_result = await self.executor.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_sym + "USDT"})
+                        orders = algo_result if isinstance(algo_result, list) else algo_result.get("orders", [])
                         cancelled = 0
                         for order in orders:
                             algo_id = order.get("algoId") or order.get("orderId")
                             if algo_id:
                                 try:
-                                    await self.collector.binance.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
+                                    await self.executor.order_executor.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
                                     cancelled += 1
                                 except Exception:
                                     pass
                         if cancelled > 0:
                             logger.info(f"Restore: {cancelled} órdenes huérfanas canceladas para {symbol}")
                     except Exception as e:
-                        logger.warning(f"Restore: no se pudieron cancelar órdenes huérfanas de {symbol}: {e}")
+                        logger.warning(f"Restore: no se pudieron cancelar órdenes de {symbol}: {e}")
 
-                    # Bug 2 fix: Obtener precio real y determinar si fue TP o SL
+                    # Obtener precio real y determinar razón
                     exit_price = 0.0
                     pnl_usd = 0.0
                     pnl_pct = 0.0
                     close_reason = "cerrada_por_binance"
                     try:
                         raw_sym = symbol.replace("USDT", "/USDT:USDT")
-                        trades_history = await self.collector.binance.exchange.fetch_my_trades(raw_sym, limit=5)
+                        trades_history = await self.collector.binance.exchange.fetch_my_trades(raw_sym, limit=10)
                         if trades_history:
-                            last_trade = trades_history[-1]
-                            exit_price = float(last_trade.get("price", 0) or 0)
+                            # Buscar el trade de cierre que coincida con el entry price
                             entry_p = trade.get("entry_price", 0) or 0
-                            qty = trade.get("amount_usd", 0) / entry_p if entry_p > 0 else 0
                             dir_ = trade.get("direction", "long")
+                            close_side = "sell" if dir_ == "long" else "buy"
+
+                            # Filtrar trades que sean del lado de cierre
+                            close_trades = [t for t in trades_history if t.get("side", "").lower() == close_side]
+                            if close_trades:
+                                last_close = close_trades[-1]
+                                exit_price = float(last_close.get("price", 0) or 0)
+                            else:
+                                exit_price = float(trades_history[-1].get("price", 0) or 0)
+
+                            qty = trade.get("amount_usd", 0) / entry_p if entry_p > 0 else 0
                             if exit_price > 0 and entry_p > 0 and qty > 0:
                                 diff = (exit_price - entry_p) if dir_ == "long" else (entry_p - exit_price)
                                 pnl_usd = round(diff * qty, 2)
                                 pnl_pct = round((diff / entry_p) * 100, 2)
 
-                            # Determinar TP o SL comparando precio de cierre con niveles
                             sl = trade.get("stop_loss", 0) or 0
                             tp = trade.get("take_profit", 0) or 0
                             if exit_price > 0 and sl > 0 and tp > 0:
                                 dist_to_sl = abs(exit_price - sl)
                                 dist_to_tp = abs(exit_price - tp)
-                                if dist_to_sl < dist_to_tp:
-                                    close_reason = "stop_loss"
-                                else:
-                                    close_reason = "take_profit"
+                                close_reason = "stop_loss" if dist_to_sl < dist_to_tp else "take_profit"
                             elif pnl_usd > 0:
                                 close_reason = "take_profit"
                             elif pnl_usd < 0:
                                 close_reason = "stop_loss"
                     except Exception as e:
-                        logger.warning(f"No se pudo obtener P&L para {symbol}: {e}")
+                        logger.warning(f"Restore: no se pudo obtener P&L para {symbol}: {e}")
 
-                    self.db.close_trade(trade_id=trade["id"], exit_price=exit_price, pnl_usd=pnl_usd, pnl_pct=pnl_pct, close_reason=close_reason)
-                    logger.info(f"Restore: {symbol} cerrada — {close_reason} | P&L: ${pnl_usd:.2f}")
+                    self.db.close_trade(trade_id=trade["id"], exit_price=exit_price,
+                                       pnl_usd=pnl_usd, pnl_pct=pnl_pct, close_reason=close_reason)
+                    logger.info(f"Restore: {symbol} cerrada en BD — {close_reason} | P&L: ${pnl_usd:.2f}")
 
-                    if self.executor.notifications_enabled:
-                        asyncio.ensure_future(self.executor.notify_trade_closed(
-                            symbol=symbol, direction=trade.get("direction", "long"),
-                            pnl_usd=pnl_usd, pnl_pct=pnl_pct, duration_min=0,
-                            close_reason=close_reason,
-                            amount_usd=trade.get("amount_usd", 0) or 0,
-                            entry_price=trade.get("entry_price", 0) or 0,
-                            exit_price=exit_price,
-                        ))
-            logger.info(f"Sincronizadas: {synced} | Restauradas: {restored}/{len(open_trades)}")
+            logger.info(f"Restore: Sincronizadas: {synced} | Restauradas: {restored}/{len(open_trades)}")
         except Exception as e:
             logger.error(f"Error restaurando posiciones: {e}")
 
@@ -438,7 +461,31 @@ class TradingAgent:
             today = datetime.now().strftime("%Y-%m-%d")
             summary = self.db.get_daily_summary(today)
             self.db.save_daily_summary(date=today, starting_balance=self.executor._daily_starting_balance or current_balance, ending_balance=current_balance)
+
+            # Obtener posiciones: primero BD, si vacío consultar Binance directamente
             open_positions = self.db.get_open_trades()
+            if not open_positions:
+                # Fallback: consultar Binance directamente
+                try:
+                    raw_positions = await self.collector.binance.exchange.fetch_positions()
+                    for p in raw_positions:
+                        if p.get("contracts") and float(p["contracts"]) > 0:
+                            base = p["symbol"].split("/")[0] if "/" in p["symbol"] else p["symbol"].replace("USDT", "")
+                            symbol = base + "USDT"
+                            entry_price = float(p.get("entryPrice") or 0)
+                            contracts = float(p.get("contracts", 0) or 0)
+                            notional = float(p.get("notional", 0) or 0)
+                            leverage = float(p.get("leverage", 1) or 1)
+                            amount_usd = abs(notional) / leverage if leverage > 0 else entry_price * contracts
+                            direction = "long" if contracts > 0 else "short"
+                            open_positions.append({
+                                "symbol": symbol, "direction": direction,
+                                "entry_price": entry_price, "amount_usd": amount_usd,
+                                "stop_loss": 0, "take_profit": 0,
+                            })
+                except Exception as e:
+                    logger.warning(f"Reporte: no se pudieron obtener posiciones de Binance: {e}")
+
             if open_positions:
                 try:
                     for pos in open_positions:
@@ -446,6 +493,7 @@ class TradingAgent:
                         pos["current_price"] = float(ticker["last"])
                 except Exception:
                     pass
+
             await self.executor.send_daily_report(current_balance, open_positions=open_positions)
             logger.info(f"Reporte enviado ({now}): {summary['total_trades']} operaciones | P&L: ${summary['total_pnl_usd']:.2f}")
         except Exception as e:
