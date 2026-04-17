@@ -89,13 +89,18 @@ class PositionMonitor:
                     symbols_to_remove.append(symbol)
                     continue
 
-                # 2. Verificar SL/TP presentes
-                existing = orders_by_sym.get(symbol, [])
-                has_sl   = any("stop" in t for t in existing)
-                has_tp   = any("take_profit" in t for t in existing)
+                # 2. Verificar SL/TP
+                # Nuestros SL/TP están en la Algo API (condicionales), NO en órdenes regulares.
+                # fetch_open_orders no las ve. Si el monitor tiene SL/TP registrados, confiar.
+                has_registered_sl = meta.get("stop_loss", 0) > 0
+                has_registered_tp = meta.get("take_profit", 0) > 0
 
-                if not has_sl or not has_tp:
-                    logger.warning(f"PositionMonitor: {symbol} sin SL/TP — reponiendo...")
+                if has_registered_sl and has_registered_tp:
+                    # SL/TP registrados — solo verificar emergency close
+                    await self._check_emergency_close(symbol, meta, symbols_to_remove)
+                else:
+                    # Sin SL/TP — intentar reponer
+                    logger.warning(f"PositionMonitor: {symbol} sin SL/TP registrados — reponiendo...")
                     if self.order_executor:
                         ok = await self.order_executor.place_sl_tp(
                             symbol=symbol,
@@ -114,8 +119,8 @@ class PositionMonitor:
                                     f"sl/tp {symbol}: No se pudieron reponer SL/TP. "
                                     f"Cierra manualmente si es necesario."
                                 )
-                else:
-                    await self._check_emergency_close(symbol, meta, symbols_to_remove)
+                    else:
+                        await self._check_emergency_close(symbol, meta, symbols_to_remove)
 
             for sym in symbols_to_remove:
                 self._tracked.pop(sym, None)
