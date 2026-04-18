@@ -185,6 +185,67 @@ class OrderExecutor:
         sig    = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         return query + f"&signature={sig}"
 
+    async def list_open_algo_orders(self, symbol: str = None) -> list:
+        """
+        Lista todas las órdenes algo (condicionales) abiertas.
+        Si symbol es None, devuelve todas. Si se pasa symbol, filtra por él.
+        Usa httpx directo porque ccxt 4.3.89 no tiene fapiPrivateGetOpenAlgoOrders.
+        Endpoint: GET /fapi/v1/algoOrder/openOrders
+        """
+        api_key = os.getenv("BINANCE_API_KEY", "")
+        url     = "https://fapi.binance.com/fapi/v1/algoOrder/openOrders"
+        headers = {"X-MBX-APIKEY": api_key}
+        params  = {"timestamp": int(time.time() * 1000)}
+        if symbol:
+            params["symbol"] = symbol.replace("/", "").replace(":USDT", "")
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                query = self._sign(params)
+                r = await client.get(f"{url}?{query}", headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    # Binance devuelve {"orders": [...]} o una lista directa
+                    if isinstance(data, list):
+                        return data
+                    return data.get("orders", [])
+                else:
+                    logger.error(f"Error listando órdenes algo: {r.status_code} {r.text}")
+                    return []
+        except Exception as e:
+            logger.error(f"Error en list_open_algo_orders: {e}")
+            return []
+
+    async def cancel_algo_order(self, symbol: str, algo_id) -> bool:
+        """
+        Cancela una orden algo específica por algoId.
+        Usa httpx directo porque ccxt 4.3.89 no tiene fapiPrivateDeleteAlgoOrder.
+        Endpoint: DELETE /fapi/v1/algoOrder
+        """
+        api_key    = os.getenv("BINANCE_API_KEY", "")
+        raw_symbol = symbol.replace("/", "").replace(":USDT", "")
+        url        = "https://fapi.binance.com/fapi/v1/algoOrder"
+        headers    = {"X-MBX-APIKEY": api_key}
+        params     = {
+            "symbol":    raw_symbol,
+            "algoId":    algo_id,
+            "timestamp": int(time.time() * 1000),
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                query = self._sign(params)
+                r = await client.delete(f"{url}?{query}", headers=headers)
+                if r.status_code == 200:
+                    logger.info(f"Algo order {algo_id} cancelada para {symbol}")
+                    return True
+                else:
+                    logger.error(f"Error cancelando algo order {algo_id} de {symbol}: {r.status_code} {r.text}")
+                    return False
+        except Exception as e:
+            logger.error(f"Error en cancel_algo_order {algo_id} de {symbol}: {e}")
+            return False
+
     async def place_sl_tp(
         self,
         symbol: str,

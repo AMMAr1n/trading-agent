@@ -224,37 +224,27 @@ class PositionMonitor:
     async def _cancel_algo_orders(self, symbol: str):
         """
         Cancela todas las órdenes condicionales (Algo) abiertas para un símbolo.
-        Usa order_executor.exchange que tiene los métodos fapiPrivate*.
-        v0.8.0 fix: incluye symbol en el DELETE (requerido por Binance) y
-        notifica por Telegram si la cancelación falla para evitar huérfanas silenciosas.
+        v0.8.1 fix: usa order_executor.list_open_algo_orders/cancel_algo_order
+        (httpx directo) porque ccxt 4.3.89 no expone fapiPrivate*AlgoOrder.
         """
         if not self.order_executor:
             logger.warning(f"PositionMonitor: no hay order_executor para cancelar órdenes de {symbol}")
             return
         try:
-            raw_symbol = symbol.replace("/", "").replace(":USDT", "")
-            algo_orders = await self.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
-            orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
+            orders = await self.order_executor.list_open_algo_orders(symbol=symbol)
             logger.info(f"PositionMonitor: {symbol} tiene {len(orders)} órden(es) algo abierta(s) para cancelar")
             cancelled = 0
             failed = 0
             for order in orders:
                 algo_id = order.get("algoId") or order.get("orderId")
                 if algo_id:
-                    try:
-                        # Binance requiere symbol + algoId para cancelar
-                        await self.order_executor.exchange.fapiPrivateDeleteAlgoOrder({
-                            "symbol": raw_symbol,
-                            "algoId": algo_id,
-                        })
+                    ok = await self.order_executor.cancel_algo_order(symbol, algo_id)
+                    if ok:
                         cancelled += 1
-                        logger.info(f"PositionMonitor: algo order {algo_id} cancelada para {symbol}")
-                    except Exception as e:
+                    else:
                         failed += 1
-                        logger.error(f"PositionMonitor: NO se pudo cancelar algo order {algo_id} para {symbol}: {e}")
             if cancelled > 0:
                 logger.info(f"PositionMonitor: {cancelled} órden(es) condicional(es) cancelada(s) para {symbol}")
-            # Si hubo fallos, notificar por Telegram para que el usuario cancele manualmente
             if failed > 0 and self.notifier:
                 try:
                     self.notifier.notify_critical_error(
@@ -278,14 +268,14 @@ class PositionMonitor:
         Barrido defensivo: detecta órdenes algo abiertas cuyo símbolo ya NO tiene
         posición abierta en Binance, y las cancela. Protege contra órdenes huérfanas
         dejadas por cierres anteriores que no fueron limpiados.
-        Se ejecuta al inicio del agente y cada ciclo del monitor.
-        v0.8.0 fix: usa order_executor.exchange (tiene métodos fapiPrivate*)
+        Se ejecuta al inicio de cada ciclo del monitor, incluso con _tracked vacío.
+        v0.8.1: usa order_executor.list_open_algo_orders (httpx directo).
         """
         if not self.order_executor:
             return
         try:
-            # 1. Obtener símbolos con posición abierta en Binance (usando executor exchange)
-            raw_positions = await self.order_executor.exchange.fetch_positions()
+            # 1. Obtener símbolos con posición abierta en Binance
+            raw_positions = await self.exchange.fetch_positions()
             open_symbols_raw = set()
             for p in raw_positions:
                 if p.get("contracts") and float(p["contracts"]) > 0:
@@ -294,8 +284,7 @@ class PositionMonitor:
                     open_symbols_raw.add(base + "USDT")
 
             # 2. Obtener TODAS las órdenes algo abiertas (sin filtrar por símbolo)
-            algo_result = await self.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({})
-            orders = algo_result if isinstance(algo_result, list) else algo_result.get("orders", [])
+            orders = await self.order_executor.list_open_algo_orders(symbol=None)
 
             # 3. Agrupar por símbolo
             orders_by_symbol: dict = {}
@@ -314,15 +303,9 @@ class PositionMonitor:
                     for order in sym_orders:
                         algo_id = order.get("algoId") or order.get("orderId")
                         if algo_id:
-                            try:
-                                await self.order_executor.exchange.fapiPrivateDeleteAlgoOrder({
-                                    "symbol": sym,
-                                    "algoId": algo_id,
-                                })
+                            ok = await self.order_executor.cancel_algo_order(sym, algo_id)
+                            if ok:
                                 total_cancelled += 1
-                                logger.info(f"PositionMonitor: huérfana {algo_id} de {sym} cancelada")
-                            except Exception as e:
-                                logger.error(f"PositionMonitor: no se pudo cancelar huérfana {algo_id} de {sym}: {e}")
 
             if total_cancelled > 0:
                 logger.info(f"PositionMonitor: barrido completado — {total_cancelled} huérfana(s) cancelada(s)")

@@ -48,7 +48,7 @@ class TradingAgent:
         self.scheduler = AsyncIOScheduler(timezone=DAILY_REPORT_TZ)
         self.running   = False
         self.learning_engine = None
-        logger.info("TradingAgent v0.8.0 inicializado")
+        logger.info("TradingAgent v0.8.1 inicializado")
 
     async def initialize(self):
         logger.info("Inicializando agente...")
@@ -261,7 +261,7 @@ class TradingAgent:
                 fear_greed=snapshot.market_context.fear_greed_index,
                 score_breakdown=score_breakdown, balance_total=balance.usdt_total,
                 balance_reserve=balance.reserve, balance_operable=balance.operable,
-                sl_tp_method="algo_api", version="v0.8.0",
+                sl_tp_method="algo_api", version="v0.8.1",
                 pattern_type=pattern_type, pattern_confidence=pattern_confidence,
                 breakout_quality=breakout_quality, breakout_score=breakout_score_val,
                 regime=regime, regime_adx=regime_adx, projected_rr=projected_rr,
@@ -318,13 +318,12 @@ class TradingAgent:
                         amount_usd = abs(notional) / leverage if leverage > 0 else entry_price * contracts
                         direction = "long" if float(p.get("contracts", 0)) > 0 else "short"
 
-                        # Obtener SL/TP usando executor exchange
+                        # Obtener SL/TP usando order_executor (httpx directo)
+                        # v0.8.1 fix: ccxt 4.3.89 no expone fapiPrivate*AlgoOrder
                         stop_loss = 0.0
                         take_profit = 0.0
                         try:
-                            raw_sym = symbol.replace("USDT", "")
-                            algo_result = await self.executor.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_sym + "USDT"})
-                            orders = algo_result if isinstance(algo_result, list) else algo_result.get("orders", [])
+                            orders = await self.executor.order_executor.list_open_algo_orders(symbol=symbol)
                             for o in orders:
                                 trigger = float(o.get("triggerPrice", 0) or 0)
                                 order_type = str(o.get("type", "")).lower()
@@ -349,7 +348,7 @@ class TradingAgent:
                             balance_total=bal.usdt_total if bal else 0,
                             balance_reserve=bal.reserve if bal else 0,
                             balance_operable=bal.operable if bal else 0,
-                            sl_tp_method="algo_api", version="v0.8.0",
+                            sl_tp_method="algo_api", version="v0.8.1",
                         ))
                         open_trades.append({"id": trade_id, "symbol": symbol, "direction": direction,
                                             "entry_price": entry_price, "amount_usd": amount_usd,
@@ -387,27 +386,22 @@ class TradingAgent:
                     # (sin notificación — el cierre ya pasó antes del reinicio)
                     logger.info(f"Restore: {symbol} (DB ID={trade['id']}) no está en Binance — cerrando en BD")
 
-                    # Cancelar órdenes huérfanas usando executor exchange
-                    # v0.8.0 fix: incluir symbol en el DELETE (requerido por Binance)
+                    # Cancelar órdenes huérfanas usando order_executor (httpx directo)
+                    # v0.8.1 fix: ccxt 4.3.89 no expone fapiPrivate*AlgoOrder, usar métodos del executor
                     try:
-                        raw_sym = symbol.replace("USDT", "") + "USDT"
-                        algo_result = await self.executor.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_sym})
-                        orders = algo_result if isinstance(algo_result, list) else algo_result.get("orders", [])
+                        orders = await self.executor.order_executor.list_open_algo_orders(symbol=symbol)
                         cancelled = 0
                         failed = 0
                         for order in orders:
                             algo_id = order.get("algoId") or order.get("orderId")
                             if algo_id:
-                                try:
-                                    await self.executor.order_executor.exchange.fapiPrivateDeleteAlgoOrder({
-                                        "symbol": raw_sym,
-                                        "algoId": algo_id,
-                                    })
+                                ok = await self.executor.order_executor.cancel_algo_order(symbol, algo_id)
+                                if ok:
                                     cancelled += 1
                                     logger.info(f"Restore: algo order {algo_id} cancelada para {symbol}")
-                                except Exception as ce:
+                                else:
                                     failed += 1
-                                    logger.error(f"Restore: NO se pudo cancelar algo order {algo_id} de {symbol}: {ce}")
+                                    logger.error(f"Restore: NO se pudo cancelar algo order {algo_id} de {symbol}")
                         if cancelled > 0:
                             logger.info(f"Restore: {cancelled} órden(es) huérfana(s) cancelada(s) para {symbol}")
                         if failed > 0 and self.executor.notifier:
@@ -526,7 +520,7 @@ class TradingAgent:
                 self.executor.notifier.notify_agent_started(balance=balance.usdt_total, operable=balance.operable, margin_in_use=balance.margin_in_use, reserve=balance.reserve, symbols=FUTURES_SYMBOLS)
         except Exception as e:
             logger.error(f"Error enviando mensaje de inicio: {e}")
-        logger.info(f"Agente v0.8.0 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
+        logger.info(f"Agente v0.8.1 corriendo — ciclo cada {LOOP_INTERVAL_MIN} minutos")
         while self.running:
             await self.run_cycle()
             await asyncio.sleep(LOOP_INTERVAL_MIN * 60)
