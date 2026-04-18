@@ -190,10 +190,10 @@ class OrderExecutor:
         Lista todas las órdenes algo (condicionales) abiertas.
         Si symbol es None, devuelve todas. Si se pasa symbol, filtra por él.
         Usa httpx directo porque ccxt 4.3.89 no tiene fapiPrivateGetOpenAlgoOrders.
-        Endpoint: GET /fapi/v1/algoOrder/openOrders
+        Endpoint: GET /fapi/v1/openAlgoOrders (confirmado con Binance 18-abr-2026)
         """
         api_key = os.getenv("BINANCE_API_KEY", "")
-        url     = "https://fapi.binance.com/fapi/v1/algoOrder/openOrders"
+        url     = "https://fapi.binance.com/fapi/v1/openAlgoOrders"
         headers = {"X-MBX-APIKEY": api_key}
         params  = {"timestamp": int(time.time() * 1000)}
         if symbol:
@@ -205,7 +205,7 @@ class OrderExecutor:
                 r = await client.get(f"{url}?{query}", headers=headers)
                 if r.status_code == 200:
                     data = r.json()
-                    # Binance devuelve {"orders": [...]} o una lista directa
+                    # Binance devuelve lista directa o {"orders": [...]}
                     if isinstance(data, list):
                         return data
                     return data.get("orders", [])
