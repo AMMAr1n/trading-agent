@@ -210,10 +210,27 @@ class TechnicalAnalyzer:
 
         levels = self.level_detector.detect(symbol, candles_1h)
 
+        # ── v0.8.0: Dirección multi-timeframe ─────────────────────────
+        # Si 1h es neutral, consultar TFs mayores antes de descartar.
+        # Los TFs ya están calculados — aprovechamos la información.
         direction = indicators_1h.suggested_direction
+        direction_source = "1h"
+
         if direction == "neutral":
-            logger.info(f"{symbol} — dirección 1h neutral — descartada")
-            return None
+            # 1h no tiene dirección — buscar en TFs mayores
+            if indicators_4h and indicators_4h.suggested_direction != "neutral":
+                direction = indicators_4h.suggested_direction
+                direction_source = "2h"
+            elif indicators_1d and indicators_1d.suggested_direction != "neutral":
+                direction = indicators_1d.suggested_direction
+                direction_source = "1d"
+            elif indicators_1w and indicators_1w.suggested_direction != "neutral":
+                direction = indicators_1w.suggested_direction
+                direction_source = "1w"
+            else:
+                logger.info(f"{symbol} — neutral en todos los TFs (1h/2h/1d/1w) — descartada")
+                return None
+            logger.info(f"{symbol} — 1h neutral, usando dirección de {direction_source}: {direction}")
 
         trading_mode = self.get_trading_mode(symbol)
         context_bonus = self.calculate_context_bonus(snapshot, direction)
