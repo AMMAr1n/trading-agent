@@ -585,7 +585,12 @@ class TechnicalIndicatorCalculator:
             candlestick_patterns = self.detect_candlestick_patterns(df)
 
             if not all([rsi, macd, bollinger, volume]):
-                logger.warning(f"Indicadores incompletos para {symbol}/{timeframe}")
+                missing = []
+                if not rsi: missing.append("RSI")
+                if not macd: missing.append("MACD")
+                if not bollinger: missing.append("Bollinger")
+                if not volume: missing.append("Volume")
+                logger.warning(f"Indicadores incompletos para {symbol}/{timeframe}: falta {', '.join(missing)}")
                 return None
 
             indicators = TechnicalIndicators(

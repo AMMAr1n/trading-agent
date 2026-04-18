@@ -177,11 +177,13 @@ class TechnicalAnalyzer:
 
     def analyze_symbol(self, symbol, snapshot):
         if symbol not in snapshot.candles:
+            logger.debug(f"{symbol} — sin datos de velas en snapshot")
             return None
 
         candles_by_tf_raw = snapshot.candles[symbol]
 
         if PRIMARY_TIMEFRAME not in candles_by_tf_raw:
+            logger.debug(f"{symbol} — sin velas de {PRIMARY_TIMEFRAME}")
             return None
 
         candles_1h = candles_by_tf_raw[PRIMARY_TIMEFRAME]
@@ -191,6 +193,7 @@ class TechnicalAnalyzer:
 
         indicators_1h = self.indicator_calc.calculate(symbol, PRIMARY_TIMEFRAME, candles_1h)
         if not indicators_1h:
+            logger.warning(f"{symbol} — indicadores 1h no disponibles")
             return None
 
         indicators_4h = None
@@ -209,6 +212,7 @@ class TechnicalAnalyzer:
 
         direction = indicators_1h.suggested_direction
         if direction == "neutral":
+            logger.info(f"{symbol} — dirección 1h neutral — descartada")
             return None
 
         trading_mode = self.get_trading_mode(symbol)
