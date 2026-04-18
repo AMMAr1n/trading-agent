@@ -6,18 +6,38 @@
 ## v0.8.1 — 18 Abril 2026
 
 **Fix crítico: cancelación de órdenes huérfanas**
-- Fix: `_cancel_algo_orders` incluye `symbol` en el payload del DELETE (Binance lo requiere)
-- Fix: errores de cancelación ahora se loggean con `logger.error` (antes warning silencioso)
-- Fix: notificación Telegram cuando la cancelación automática falla
-- Fix: `_restore_tracked_positions` quita el `except: pass` silencioso al cancelar órdenes
-- Feat: `sweep_orphan_algo_orders` — barrido defensivo al inicio de cada ciclo
-- Feat: barrido detecta órdenes algo de símbolos sin posición abierta y las cancela
-- Fix: `sweep_orphan_algo_orders` usa `order_executor.exchange` (tiene métodos `fapiPrivate*`)
-- Resultado: bloquea definitivamente órdenes huérfanas como la del Trade #8 (XRP TP $1.5731)
 
-**Archivos modificados**
+### Causa raíz descubierta
+- ccxt 4.3.89 NO expone los métodos `fapiPrivate*AlgoOrder` (solo existen `sapi*` para TWAP/VP)
+- `_cancel_algo_orders` y el fix "completado" de v0.6.0 **nunca funcionaron realmente** — fallaban silenciosamente
+- Evidencia: la orden huérfana de TP del Trade #8 (XRP $1.5731) sobrevivió al cierre
+
+### Arquitectura de la solución
+- Feat: `OrderExecutor.list_open_algo_orders(symbol=None)` — httpx directo
+- Feat: `OrderExecutor.cancel_algo_order(symbol, algo_id)` — httpx directo
+- Toda la lógica HTTP concentrada en `order_executor.py` (no duplicada en monitor)
+
+### Endpoints confirmados con Binance (18-abr-2026)
+- `GET /fapi/v1/openAlgoOrders` — listar (200 OK con lista vacía)
+- `DELETE /fapi/v1/algoOrder` — cancelar (400 "Unknown order" con algoId ficticio = endpoint válido)
+- Asimetría confirmada: el path de listar NO es espejo del de cancelar
+
+### Triple protección
+- Fix: `_cancel_algo_orders` en `position_monitor.py` usa los nuevos métodos httpx
+- Feat: `sweep_orphan_algo_orders` — barrido defensivo cada ciclo del monitor
+- Fix: `_restore_tracked_positions` en `main.py` usa los nuevos métodos httpx
+- Fix: errores ahora se loggean con `logger.error` (antes warning silencioso)
+- Fix: notificación Telegram cuando la cancelación automática falla
+
+### Archivos modificados
+- `executor/order_executor.py` — +`list_open_algo_orders`, +`cancel_algo_order`
 - `executor/position_monitor.py` — `_cancel_algo_orders` + nuevo `sweep_orphan_algo_orders`
-- `main.py` — `_restore_tracked_positions` cancelación robusta con logs
+- `main.py` — `_restore_tracked_positions` (cancelación + obtención de SL/TP)
+
+### Validación post-deploy
+- `list_open_algo_orders()` → `Órdenes algo abiertas: 0` sin errores
+- Logs del servicio sin `'binance' object has no attribute...`
+- Snapshot completo ejecutado con 15/15 activos disponibles
 
 ---
 

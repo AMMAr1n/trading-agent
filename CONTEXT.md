@@ -136,20 +136,30 @@ BINANCE_TESTNET=false, DAILY_REPORT_TIMEZONE=America/Mexico_City
 
 ---
 
-## CANCELACIÓN DE ÓRDENES HUÉRFANAS (v0.8.1)
+## CANCELACIÓN DE ÓRDENES HUÉRFANAS (v0.8.1) ✅ VALIDADO
 
 ### Triple protección
-El sistema ahora cancela órdenes algo huérfanas en tres momentos:
+El sistema cancela órdenes algo huérfanas en tres momentos:
 
-1. **En caliente** — `position_monitor.run()` detecta cierre → `_cancel_algo_orders(symbol)` con `symbol + algoId` en el DELETE
-2. **Al restaurar** — `_restore_tracked_positions()` al reiniciar, si un trade de BD no está en Binance → cancela sus órdenes algo con logs visibles
+1. **En caliente** — `position_monitor.run()` detecta cierre → `_cancel_algo_orders(symbol)` usa `OrderExecutor.cancel_algo_order()` (httpx directo)
+2. **Al restaurar** — `_restore_tracked_positions()` al reiniciar, si un trade de BD no está en Binance → cancela sus órdenes algo
 3. **Barrido defensivo** — `sweep_orphan_algo_orders()` al inicio de cada ciclo del monitor: detecta órdenes algo de símbolos sin posición abierta y las cancela
 
-### Detalles técnicos
-- Binance requiere `symbol` + `algoId` en el DELETE de Algo API (no solo `algoId`)
-- `order_executor.exchange` es el que tiene los métodos `fapiPrivate*` — el collector exchange NO
-- Errores de cancelación ahora se notifican por Telegram (`huerfana {symbol}: ...`)
+### Detalles técnicos críticos
+- **ccxt 4.3.89 NO expone `fapiPrivate*AlgoOrder`** — solo existen `sapi*` para TWAP/VP
+- Toda la lógica HTTP está en `order_executor.py` con httpx directo + firma HMAC
+- Endpoints confirmados de Binance Futuros Algo API:
+  - `GET /fapi/v1/openAlgoOrders` — listar abiertas
+  - `POST /fapi/v1/algoOrder` — colocar (SL/TP)
+  - `DELETE /fapi/v1/algoOrder` — cancelar
+- El path de listar NO es espejo del de cancelar (asimetría de Binance)
+- Errores se notifican por Telegram (`huerfana {symbol}: ...`)
 - El barrido se ejecuta incluso con `_tracked` vacío (después de un reinicio)
+
+### Validación post-deploy (18-abr-2026 15:23 UTC)
+- `list_open_algo_orders()` → 0 huérfanas, sin errores
+- Servicio arranca limpio sin trazas de `'binance' object has no attribute...`
+- Snapshot completo con 15/15 activos procesados
 
 ---
 
@@ -194,16 +204,17 @@ El score sigue calculándose con indicadores de 1h. Cuando el 1h está dormido (
 ---
 
 ## BUGS RESUELTOS
-### En v0.8.1
-- [x] `_cancel_algo_orders` fallaba silenciosamente por faltar `symbol` en DELETE
-- [x] `_restore_tracked_positions` tenía `except: pass` que ocultaba fallos de cancelación
+### En v0.8.1 ✅
+- [x] ccxt 4.3.89 NO expone `fapiPrivate*AlgoOrder` — solución con httpx directo
+- [x] `_cancel_algo_orders` fallaba silenciosamente desde v0.6.0 (nunca funcionó realmente)
+- [x] Endpoint correcto de listar: `/fapi/v1/openAlgoOrders` (no `/fapi/v1/algoOrder/openOrders`)
+- [x] `_restore_tracked_positions` tenía `except: pass` que ocultaba fallos
 - [x] No había protección contra órdenes huérfanas legacy de cierres previos
-- [x] `sweep_orphan_algo_orders` usaba collector exchange (sin métodos `fapiPrivate*`)
+- [x] Barrido defensivo `sweep_orphan_algo_orders` añadido al ciclo del monitor
 
 ### En v0.8.0
 - [x] position_monitor: símbolo no normalizado (XRP/USDT:USDT vs XRPUSDT)
 - [x] position_monitor: fetch_open_orders sin símbolo → rate limit
-- [x] _cancel_algo_orders: usaba collector exchange en vez de executor exchange
 - [x] _restore_tracked_positions: cerraba posiciones que sí existían en Binance
 - [x] Targets incoherentes de patrones macro sin breakout
 - [x] Notificaciones "cerrada_por_binance" en vez de TP/SL
@@ -217,7 +228,7 @@ El score sigue calculándose con indicadores de 1h. Cuando el 1h está dormido (
 - [ ] Parser de Claude falla con ```json al inicio de respuesta
 
 ## VALIDACIONES PENDIENTES
-- [ ] Cancelación automática de órdenes huérfanas con el próximo trade que cierre
+- [ ] Validar triple protección con próximo cierre real de trade (SL o TP)
 - [ ] Confirmar Open Orders > Conditional queda vacío post-cierre sin intervención manual
 
 ---
