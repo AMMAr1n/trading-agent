@@ -279,12 +279,13 @@ class PositionMonitor:
         posición abierta en Binance, y las cancela. Protege contra órdenes huérfanas
         dejadas por cierres anteriores que no fueron limpiados.
         Se ejecuta al inicio del agente y cada ciclo del monitor.
+        v0.8.0 fix: usa order_executor.exchange (tiene métodos fapiPrivate*)
         """
         if not self.order_executor:
             return
         try:
-            # 1. Obtener símbolos con posición abierta en Binance
-            raw_positions = await self.exchange.fetch_positions()
+            # 1. Obtener símbolos con posición abierta en Binance (usando executor exchange)
+            raw_positions = await self.order_executor.exchange.fetch_positions()
             open_symbols_raw = set()
             for p in raw_positions:
                 if p.get("contracts") and float(p["contracts"]) > 0:
