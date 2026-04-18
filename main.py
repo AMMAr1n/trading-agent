@@ -48,7 +48,7 @@ class TradingAgent:
         self.scheduler = AsyncIOScheduler(timezone=DAILY_REPORT_TZ)
         self.running   = False
         self.learning_engine = None
-        logger.info("TradingAgent v0.7.2 inicializado")
+        logger.info("TradingAgent v0.8.0 inicializado")
 
     async def initialize(self):
         logger.info("Inicializando agente...")
@@ -349,7 +349,7 @@ class TradingAgent:
                             balance_total=bal.usdt_total if bal else 0,
                             balance_reserve=bal.reserve if bal else 0,
                             balance_operable=bal.operable if bal else 0,
-                            sl_tp_method="algo_api", version="v0.7.2",
+                            sl_tp_method="algo_api", version="v0.8.0",
                         ))
                         open_trades.append({"id": trade_id, "symbol": symbol, "direction": direction,
                                             "entry_price": entry_price, "amount_usd": amount_usd,
@@ -388,23 +388,38 @@ class TradingAgent:
                     logger.info(f"Restore: {symbol} (DB ID={trade['id']}) no está en Binance — cerrando en BD")
 
                     # Cancelar órdenes huérfanas usando executor exchange
+                    # v0.8.0 fix: incluir symbol en el DELETE (requerido por Binance)
                     try:
-                        raw_sym = symbol.replace("USDT", "")
-                        algo_result = await self.executor.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_sym + "USDT"})
+                        raw_sym = symbol.replace("USDT", "") + "USDT"
+                        algo_result = await self.executor.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_sym})
                         orders = algo_result if isinstance(algo_result, list) else algo_result.get("orders", [])
                         cancelled = 0
+                        failed = 0
                         for order in orders:
                             algo_id = order.get("algoId") or order.get("orderId")
                             if algo_id:
                                 try:
-                                    await self.executor.order_executor.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
+                                    await self.executor.order_executor.exchange.fapiPrivateDeleteAlgoOrder({
+                                        "symbol": raw_sym,
+                                        "algoId": algo_id,
+                                    })
                                     cancelled += 1
-                                except Exception:
-                                    pass
+                                    logger.info(f"Restore: algo order {algo_id} cancelada para {symbol}")
+                                except Exception as ce:
+                                    failed += 1
+                                    logger.error(f"Restore: NO se pudo cancelar algo order {algo_id} de {symbol}: {ce}")
                         if cancelled > 0:
-                            logger.info(f"Restore: {cancelled} órdenes huérfanas canceladas para {symbol}")
+                            logger.info(f"Restore: {cancelled} órden(es) huérfana(s) cancelada(s) para {symbol}")
+                        if failed > 0 and self.executor.notifier:
+                            try:
+                                self.executor.notifier.notify_critical_error(
+                                    f"huerfana {symbol}: {failed} orden(es) NO canceladas al restaurar. "
+                                    f"Revisa Open Orders > Conditional en Binance."
+                                )
+                            except Exception:
+                                pass
                     except Exception as e:
-                        logger.warning(f"Restore: no se pudieron cancelar órdenes de {symbol}: {e}")
+                        logger.error(f"Restore: error cancelando órdenes huérfanas de {symbol}: {e}")
 
                     # Obtener precio real y determinar razón
                     exit_price = 0.0

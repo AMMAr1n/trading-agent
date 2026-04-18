@@ -48,6 +48,10 @@ class PositionMonitor:
         )
 
     async def run(self):
+        # v0.8.0: barrido defensivo siempre, incluso si _tracked está vacío
+        # Esto detecta órdenes huérfanas de cierres previos que no fueron limpiados
+        await self.sweep_orphan_algo_orders()
+
         if not self._tracked:
             return
 
@@ -221,6 +225,8 @@ class PositionMonitor:
         """
         Cancela todas las órdenes condicionales (Algo) abiertas para un símbolo.
         Usa order_executor.exchange que tiene los métodos fapiPrivate*.
+        v0.8.0 fix: incluye symbol en el DELETE (requerido por Binance) y
+        notifica por Telegram si la cancelación falla para evitar huérfanas silenciosas.
         """
         if not self.order_executor:
             logger.warning(f"PositionMonitor: no hay order_executor para cancelar órdenes de {symbol}")
@@ -229,19 +235,105 @@ class PositionMonitor:
             raw_symbol = symbol.replace("/", "").replace(":USDT", "")
             algo_orders = await self.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
             orders = algo_orders if isinstance(algo_orders, list) else algo_orders.get("orders", [])
+            logger.info(f"PositionMonitor: {symbol} tiene {len(orders)} órden(es) algo abierta(s) para cancelar")
             cancelled = 0
+            failed = 0
             for order in orders:
                 algo_id = order.get("algoId") or order.get("orderId")
                 if algo_id:
                     try:
-                        await self.order_executor.exchange.fapiPrivateDeleteAlgoOrder({"algoId": algo_id})
+                        # Binance requiere symbol + algoId para cancelar
+                        await self.order_executor.exchange.fapiPrivateDeleteAlgoOrder({
+                            "symbol": raw_symbol,
+                            "algoId": algo_id,
+                        })
                         cancelled += 1
+                        logger.info(f"PositionMonitor: algo order {algo_id} cancelada para {symbol}")
                     except Exception as e:
-                        logger.warning(f"PositionMonitor: no se pudo cancelar algo order {algo_id}: {e}")
+                        failed += 1
+                        logger.error(f"PositionMonitor: NO se pudo cancelar algo order {algo_id} para {symbol}: {e}")
             if cancelled > 0:
-                logger.info(f"PositionMonitor: {cancelled} órdenes condicionales canceladas para {symbol}")
+                logger.info(f"PositionMonitor: {cancelled} órden(es) condicional(es) cancelada(s) para {symbol}")
+            # Si hubo fallos, notificar por Telegram para que el usuario cancele manualmente
+            if failed > 0 and self.notifier:
+                try:
+                    self.notifier.notify_critical_error(
+                        f"huerfana {symbol}: {failed} orden(es) algo NO cancelada(s) automáticamente. "
+                        f"Revisa 'Open Orders > Conditional' en Binance y cancela manualmente."
+                    )
+                except Exception:
+                    pass
         except Exception as e:
-            logger.warning(f"PositionMonitor: error cancelando órdenes algo para {symbol}: {e}")
+            logger.error(f"PositionMonitor: error cancelando órdenes algo para {symbol}: {e}")
+            if self.notifier:
+                try:
+                    self.notifier.notify_critical_error(
+                        f"huerfana {symbol}: fallo al consultar órdenes algo. Revisa Open Orders manualmente."
+                    )
+                except Exception:
+                    pass
+
+    async def sweep_orphan_algo_orders(self):
+        """
+        Barrido defensivo: detecta órdenes algo abiertas cuyo símbolo ya NO tiene
+        posición abierta en Binance, y las cancela. Protege contra órdenes huérfanas
+        dejadas por cierres anteriores que no fueron limpiados.
+        Se ejecuta al inicio del agente y cada ciclo del monitor.
+        """
+        if not self.order_executor:
+            return
+        try:
+            # 1. Obtener símbolos con posición abierta en Binance
+            raw_positions = await self.exchange.fetch_positions()
+            open_symbols_raw = set()
+            for p in raw_positions:
+                if p.get("contracts") and float(p["contracts"]) > 0:
+                    sym = p["symbol"]
+                    base = sym.split("/")[0] if "/" in sym else sym.replace("USDT", "")
+                    open_symbols_raw.add(base + "USDT")
+
+            # 2. Obtener TODAS las órdenes algo abiertas (sin filtrar por símbolo)
+            algo_result = await self.order_executor.exchange.fapiPrivateGetOpenAlgoOrders({})
+            orders = algo_result if isinstance(algo_result, list) else algo_result.get("orders", [])
+
+            # 3. Agrupar por símbolo
+            orders_by_symbol: dict = {}
+            for o in orders:
+                sym = o.get("symbol", "")
+                if sym:
+                    orders_by_symbol.setdefault(sym, []).append(o)
+
+            # 4. Cancelar órdenes de símbolos SIN posición abierta
+            total_cancelled = 0
+            for sym, sym_orders in orders_by_symbol.items():
+                if sym not in open_symbols_raw:
+                    logger.warning(
+                        f"PositionMonitor: {sym} tiene {len(sym_orders)} orden(es) algo huérfana(s) — cancelando"
+                    )
+                    for order in sym_orders:
+                        algo_id = order.get("algoId") or order.get("orderId")
+                        if algo_id:
+                            try:
+                                await self.order_executor.exchange.fapiPrivateDeleteAlgoOrder({
+                                    "symbol": sym,
+                                    "algoId": algo_id,
+                                })
+                                total_cancelled += 1
+                                logger.info(f"PositionMonitor: huérfana {algo_id} de {sym} cancelada")
+                            except Exception as e:
+                                logger.error(f"PositionMonitor: no se pudo cancelar huérfana {algo_id} de {sym}: {e}")
+
+            if total_cancelled > 0:
+                logger.info(f"PositionMonitor: barrido completado — {total_cancelled} huérfana(s) cancelada(s)")
+                if self.notifier:
+                    try:
+                        self.notifier.notify_critical_error(
+                            f"huerfanas: {total_cancelled} orden(es) algo huérfana(s) canceladas automáticamente."
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"PositionMonitor: error en barrido de huérfanas: {e}")
 
     async def _notify_closed(self, symbol: str, meta: dict):
         if not self.notifier and not self.trading_executor:
